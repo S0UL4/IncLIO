@@ -1,0 +1,69 @@
+"""
+inclio_velodyne.launch.py
+Launch the IncLIO ROS2 node with a Velodyne (or any PointCloud2) LiDAR.
+
+Usage:
+    ros2 launch inclio_ros2 inclio_velodyne.launch.py \\
+        config_file:=/path/to/velodyne_test.yaml \\
+        imu_topic:=/imu/data \\
+        lidar_topic:=/velodyne_points
+"""
+
+from launch import LaunchDescription
+from launch.actions import DeclareLaunchArgument
+from launch.substitutions import LaunchConfiguration
+from launch_ros.actions import Node
+
+
+def generate_launch_description():
+    # ── Declare arguments ─────────────────────────────────────────────────────
+    args = [
+        DeclareLaunchArgument("config_file",      default_value="config/velodyne_ros2.yaml",
+                              description="Path to IncLIO YAML config file"),
+        DeclareLaunchArgument("imu_topic",         default_value="/sensor/sbg/imu/data",
+                              description="IMU topic"),
+        DeclareLaunchArgument("lidar_topic",       default_value="/astra_lidar/data_filtered",
+                              description="LiDAR PointCloud2 topic"),
+        DeclareLaunchArgument("lidar_type",        default_value="4",
+                              description="1=Livox  2=Velodyne  3=Ouster 4=Hesai"),
+        DeclareLaunchArgument("num_scans",         default_value="128"),
+        DeclareLaunchArgument("time_scale",        default_value="1e-3",
+                              description="Per-point time field scale to seconds"),
+        DeclareLaunchArgument("point_filter_num",  default_value="1",
+                              description="Keep every N-th point"),
+        DeclareLaunchArgument("world_frame",       default_value="world"),
+        DeclareLaunchArgument("body_frame",        default_value="body"),
+        DeclareLaunchArgument("publish_tf",        default_value="true"),
+        DeclareLaunchArgument("publish_path",      default_value="true"),
+        DeclareLaunchArgument("publish_cloud",     default_value="true"),
+    ]
+
+    # ── Node ──────────────────────────────────────────────────────────────────
+    node = Node(
+        package="inclio_ros2",
+        executable="inclio_ros2_node",
+        name="inclio",
+        output="screen",
+        parameters=[{
+            "config_file":      LaunchConfiguration("config_file"),
+            "lidar_type":       LaunchConfiguration("lidar_type"),
+            "num_scans":        LaunchConfiguration("num_scans"),
+            "time_scale":       LaunchConfiguration("time_scale"),
+            "point_filter_num": LaunchConfiguration("point_filter_num"),
+            "world_frame":      LaunchConfiguration("world_frame"),
+            "body_frame":       LaunchConfiguration("body_frame"),
+            "publish_tf":       LaunchConfiguration("publish_tf"),
+            "publish_path":     LaunchConfiguration("publish_path"),
+            "publish_cloud":    LaunchConfiguration("publish_cloud"),
+            "imu_topic":       LaunchConfiguration("imu_topic"),
+            "lidar_topic":     LaunchConfiguration("lidar_topic"),
+        }],
+        remappings=[
+            # Map the node's ~/imu and ~/points to the actual sensor topics
+            ("inclio/imu",    LaunchConfiguration("imu_topic")),
+            ("inclio/points", LaunchConfiguration("lidar_topic")),
+        ],
+        # prefix=["gdbserver localhost:3000"]    
+        )
+
+    return LaunchDescription(args + [node])
