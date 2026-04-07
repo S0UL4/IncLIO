@@ -14,11 +14,30 @@
 
 #include <pcl/filters/voxel_grid.h>
 #include <pcl/common/transforms.h>
+#include <tbb/concurrent_hash_map.h>
 #include <memory>
 #include <vector>
 #include <string>
 
+// OMP for parallel loops
+#include <omp.h>
+
 namespace IncLIO {
+
+/// Accumulator for parallel voxel grid downsampling.
+/// Stores running sums so the centroid can be computed as (sx/count, sy/count, sz/count).
+struct VoxelAccum {
+    double sx = 0, sy = 0, sz = 0, si = 0;
+    int count = 0;
+};
+
+/// TBB HashCompare for Vec3i keys, reuses the existing hash_vec<3> spatial hash.
+struct Vec3iHashCompare {
+    static size_t hash(const Vec3i& v) { return hash_vec<3>{}(v); }
+    static bool equal(const Vec3i& a, const Vec3i& b) { return a == b; }
+};
+
+using VoxelHashMap = tbb::concurrent_hash_map<Vec3i, VoxelAccum, Vec3iHashCompare>;
 
 // Forward declaration for optional UI
 namespace ui { class PangolinWindow; }

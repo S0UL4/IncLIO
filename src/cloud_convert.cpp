@@ -73,10 +73,12 @@ void CloudConverter::HesaiHandler(const sensor_msgs::msg::PointCloud2 & msg) {
     // Hesai timestamps are absolute (seconds since epoch); the undistortion code
     // expects relative offsets in milliseconds from scan start.
     double t0 = std::numeric_limits<double>::max();
-    for (const auto& pt : pl_orig.points) {
-        if (pt.timestamp < t0) t0 = pt.timestamp;
+    #pragma omp parallel for
+    for(size_t i = 0; i < pl_orig.points.size(); i++) {
+        if (pl_orig.points[i].timestamp < t0) t0 = pl_orig.points[i].timestamp;
     }
 
+    #pragma omp parallel for
     for (int i = 0; i < pl_orig.points.size(); i++) {
         if (i % cfg_.point_filter_num != 0) continue;
 

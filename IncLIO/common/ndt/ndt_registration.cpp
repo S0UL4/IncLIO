@@ -126,61 +126,23 @@ void NdtRegistration::ComputeResidualAndJacobians(const SE3& input_pose, Mat18d&
     assert(source_ != nullptr);
 
     SE3 pose = input_pose;
+    Mat3d R = pose.so3().matrix();
 
     const auto& nearby_grids = ndt_map_->GetNearbyGrids();
     int num_residual_per_point = static_cast<int>(nearby_grids.size());
     double inv_voxel_size = ndt_map_->GetOptions().inv_voxel_size;
+    double res_outlier_th = options_.res_outlier_th;
 
     std::vector<int> index(source_->points.size());
     std::iota(index.begin(), index.end(), 0);
 
-    int total_size = static_cast<int>(index.size()) * num_residual_per_point;
-
-    std::vector<bool> effect_pts(total_size, false);
-    std::vector<Eigen::Matrix<double, 3, 18>> jacobians(total_size);
-    std::vector<Vec3d> errors(total_size);
-    std::vector<Mat3d> infos(total_size);
-
-    // Compute residuals and Jacobians for IESKF (parallel)
-    std::for_each(std::execution::par_unseq, index.begin(), index.end(), [&](int idx) {
-        auto q = ToVec3d(source_->points[idx]);
-        Vec3d qs = pose * q;
-
-        Vec3i key = CastToInt(Vec3d(qs * inv_voxel_size));
-
-        for (int i = 0; i < num_residual_per_point; ++i) {
-            Vec3i real_key = key + nearby_grids[i];
-            int real_idx = idx * num_residual_per_point + i;
-
-            auto* v = ndt_map_->GetVoxel(real_key);
-            if (v && v->IsValid()) {
-                Vec3d e = qs - v->GetMean();
-
-                double res = e.transpose() * v->GetInfoMatrix() * e;
-                if (std::isnan(res) || res > options_.res_outlier_th) {
-                    effect_pts[real_idx] = false;
-                    continue;
-                }
-
-                // IESKF state: [p(3), v(3), R(3), ba(3), bg(3), g(3)]
-                // Jacobian: dz/dp = I, dz/dR = -R * hat(q)
-                Eigen::Matrix<double, 3, 18> J;
-                J.setZero();
-                J.block<3, 3>(0, 0) = Mat3d::Identity();                   // w.r.t. position
-                J.block<3, 3>(0, 6) = -pose.so3().matrix() * SO3::hat(q);  // w.r.t. rotation
-
-                jacobians[real_idx] = J;
-                errors[real_idx] = e;
-                infos[real_idx] = v->GetInfoMatrix();
-                effect_pts[real_idx] = true;
-            } else {
-                effect_pts[real_idx] = false;
-            }
-        }
-    });
-
-    // Accumulate (parallel reduction over points)
-    const double info_ratio = 0.02;  // scale down the information to avoid overconfidence in IESKF update
+    // Fused compute + accumulate in a single parallel pass.
+    // Exploits Jacobian sparsity: J is 3x18 but only cols 0:2 (position) and
+    // 6:8 (rotation) are nonzero, so J^T*V*J has only 4 nonzero 3x3 blocks
+    // and J^T*V*e has only 2 nonzero 3x1 blocks. This avoids:
+    //   - ~37 MB of intermediate heap allocations (jacobians/errors/infos/flags)
+    //   - Dense 18x3 * 3x3 * 3x18 multiplies (324 ops -> 36 ops per residual)
+    const double info_ratio = 0.02;
 
     struct Accum18 {
         Mat18d HTVH = Mat18d::Zero();
@@ -197,12 +159,47 @@ void NdtRegistration::ComputeResidualAndJacobians(const SE3& input_pose, Mat18d&
         },
         [&](int idx) -> Accum18 {
             Accum18 a;
+            Vec3d q = ToVec3d(source_->points[idx]);
+            Vec3d qs = pose * q;
+            Vec3i key = CastToInt(Vec3d(qs * inv_voxel_size));
+
+            // Pre-compute once per point (shared across all 7 neighbors)
+            // M = -R * hat(q)  — the rotation Jacobian block
+            Mat3d M = -R * SO3::hat(q);
+
             for (int i = 0; i < num_residual_per_point; ++i) {
-                int ri = idx * num_residual_per_point + i;
-                if (!effect_pts[ri]) continue;
+                auto* v = ndt_map_->GetVoxel(key + nearby_grids[i]);
+                if (!v || !v->IsValid()) continue;
+
+                Vec3d e = qs - v->GetMean();
+                const Mat3d& info = v->GetInfoMatrix();
+                double res = e.transpose() * info * e;
+                if (std::isnan(res) || res > res_outlier_th) continue;
+
+                // Scaled info and info*error — used by all block accumulations
+                Mat3d V = info * info_ratio;      // 3x3
+                Vec3d Ve = V * e;                  // 3x1
+
+                // Exploit J sparsity: J = [I₃ | 0 | M | 0 | 0 | 0]
+                // HTVH += J^T * V * J  — only 4 nonzero 3x3 blocks:
+                //   (0,0): I^T * V * I = V
+                //   (0,6): I^T * V * M = V * M
+                //   (6,0): M^T * V * I = M^T * V        (symmetric to (0,6))
+                //   (6,6): M^T * V * M
+                Mat3d VM = V * M;
+
+                a.HTVH.block<3, 3>(0, 0) += V;
+                a.HTVH.block<3, 3>(0, 6) += VM;
+                a.HTVH.block<3, 3>(6, 0) += VM.transpose();
+                a.HTVH.block<3, 3>(6, 6) += M.transpose() * VM;
+
+                // HTVr += -J^T * V * e  — only 2 nonzero 3x1 blocks:
+                //   (0): -I^T * V * e = -Ve
+                //   (6): -M^T * V * e
+                a.HTVr.segment<3>(0) += -Ve;
+                a.HTVr.segment<3>(6) += -M.transpose() * Ve;
+
                 a.effective_num++;
-                a.HTVH += jacobians[ri].transpose() * infos[ri] * jacobians[ri] * info_ratio;
-                a.HTVr += -jacobians[ri].transpose() * infos[ri] * errors[ri] * info_ratio;
             }
             return a;
         });

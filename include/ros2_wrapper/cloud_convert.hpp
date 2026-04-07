@@ -1,3 +1,4 @@
+#include <omp.h> // for parallel loops in cloud conversion
 #pragma once
 
 // cloud_convert.hpp
