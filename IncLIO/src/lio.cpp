@@ -72,6 +72,27 @@ bool LIO::LoadFromYAML(const std::string& yaml_file) {
 
 void LIO::AddIMU(IMUPtr imu) {
     sync_->ProcessIMU(imu);
+
+    // High-rate forward propagation (kinematics only, no covariance).
+    // This runs on every IMU arrival so GetPropagatedState() returns an
+    // up-to-date pose at IMU rate. The real IESKF is not touched here.
+    if (!imu_need_init_) {
+        std::lock_guard<std::mutex> lock(prop_state_mutex_);
+        double dt = imu->timestamp_ - prop_state_.timestamp_;
+        if (dt > 0 && dt < 0.1) {
+            Vec3d acce = imu->acce_;
+            Vec3d gyro = imu->gyro_;
+            SO3 R = prop_state_.R_;
+
+            prop_state_.p_ += prop_state_.v_ * dt
+                            + 0.5 * (R * (acce - prop_state_.ba_)) * dt * dt
+                            + 0.5 * prop_gravity_ * dt * dt;
+            prop_state_.v_ += R * (acce - prop_state_.ba_) * dt
+                            + prop_gravity_ * dt;
+            prop_state_.R_ = R * SO3::exp((gyro - prop_state_.bg_) * dt);
+            prop_state_.timestamp_ = imu->timestamp_;
+        }
+    }
 }
 
 void LIO::AddCloud(FullCloudPtr cloud, double timestamp) {
@@ -95,6 +116,14 @@ void LIO::ProcessMeasurements(const MeasureGroup& meas) {
     auto t2 = std::chrono::high_resolution_clock::now();
     Align();
     auto t3 = std::chrono::high_resolution_clock::now();
+
+    // Reset the high-rate propagated state to the NDT-corrected estimate.
+    // From here, each incoming IMU in AddIMU() will propagate forward from this anchor.
+    {
+        std::lock_guard<std::mutex> lock(prop_state_mutex_);
+        prop_state_ = ieskf_.GetNominalState();
+        prop_gravity_ = ieskf_.GetGravity();
+    }
 
     INCLIO_INFO("Frame {}: Predict {:.3f} ms | Undistort {:.3f} ms | Align {:.3f} ms | Total {:.3f} ms",
         frame_num_,

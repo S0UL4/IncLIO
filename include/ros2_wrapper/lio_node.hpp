@@ -118,6 +118,7 @@ private:
 #endif
 
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr   odom_pub_;
+    rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr   odom_fast_pub_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr       path_pub_;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_world_pub_;
 

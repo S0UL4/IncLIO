@@ -206,6 +206,7 @@ void LioNode::CreatePublishers() {
     tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
 
     odom_pub_  = create_publisher<nav_msgs::msg::Odometry>("~/odometry", 10);
+    odom_fast_pub_ = create_publisher<nav_msgs::msg::Odometry>("~/odometry_fast", 50);
     path_pub_  = create_publisher<nav_msgs::msg::Path>("~/path", 10);
 
     if (publish_cloud_) {
@@ -229,9 +230,40 @@ void LioNode::ImuCallback(sensor_msgs::msg::Imu::UniquePtr msg) {
         return;
     }
 
-    // Buffer only — cloud callback drains this into LIO before each scan
-    std::lock_guard<std::mutex> lock(imu_buf_mutex_);
-    imu_buffer_.push_back(imu_out);
+    if (lio_ && lio_->IsInitialized()) {
+        // After init: feed IMU directly into LIO (for MessageSync + high-rate
+        // propagation), then publish the propagated pose at IMU rate.
+        lio_->AddIMU(imu_out);
+
+        auto state = lio_->GetPropagatedState();
+        auto pose = state.GetSE3();
+
+        nav_msgs::msg::Odometry odom;
+        odom.header.stamp    = msg->header.stamp;
+        odom.header.frame_id = world_frame_;
+        odom.child_frame_id  = body_frame_;
+
+        const auto& t = pose.translation();
+        const auto  q = pose.unit_quaternion();
+        odom.pose.pose.position.x    = t.x();
+        odom.pose.pose.position.y    = t.y();
+        odom.pose.pose.position.z    = t.z();
+        odom.pose.pose.orientation.x = q.x();
+        odom.pose.pose.orientation.y = q.y();
+        odom.pose.pose.orientation.z = q.z();
+        odom.pose.pose.orientation.w = q.w();
+
+        IncLIO::Vec3d v_body = pose.so3().inverse() * state.v_;
+        odom.twist.twist.linear.x = v_body.x();
+        odom.twist.twist.linear.y = v_body.y();
+        odom.twist.twist.linear.z = v_body.z();
+
+        odom_fast_pub_->publish(odom);
+    } else {
+        // Before init: buffer only — ProcessCloud drains these into LIO
+        std::lock_guard<std::mutex> lock(imu_buf_mutex_);
+        imu_buffer_.push_back(imu_out);
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -278,8 +310,9 @@ void LioNode::LivoxCallback(const livox_ros_driver2::msg::CustomMsg::SharedPtr m
 void LioNode::ProcessCloud(IncLIO::FullCloudPtr cloud, double ts,
                             const rclcpp::Time& stamp)
 {
-    // Drain all buffered IMU into LIO first (brief lock — doesn't block IMU
-    // callbacks for long since we just swap-and-clear).
+    // Before initialization, ImuCallback only buffers (doesn't call AddIMU).
+    // Drain any buffered IMUs into LIO here. After init, ImuCallback feeds
+    // AddIMU directly, so the buffer stays empty and this is a no-op.
     {
         std::deque<IMUPtr> local_buf;
         {

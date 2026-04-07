@@ -16,6 +16,7 @@
 #include <pcl/common/transforms.h>
 #include <tbb/concurrent_hash_map.h>
 #include <memory>
+#include <mutex>
 #include <vector>
 #include <string>
 
@@ -102,11 +103,21 @@ class LIO {
     /// Feed a LiDAR scan (buffered by MessageSync, triggers processing when synced)
     void AddCloud(FullCloudPtr cloud, double timestamp);
 
-    /// Get current pose estimate
+    /// Get current pose estimate (scan-rate, after NDT correction)
     SE3 GetCurrentPose() const { return ieskf_.GetNominalSE3(); }
 
-    /// Get full state
+    /// Get full state (scan-rate, after NDT correction)
     Stated GetCurrentState() const { return ieskf_.GetNominalState(); }
+
+    /// Get the latest IMU-propagated state (IMU-rate, between scans).
+    /// Thread-safe — can be called from any thread.
+    Stated GetPropagatedState() const {
+        std::lock_guard<std::mutex> lock(prop_state_mutex_);
+        return prop_state_;
+    }
+
+    /// Get the IESKF gravity estimate
+    Vec3d GetGravity() const { return ieskf_.GetGravity(); }
 
     /// Get the current aligned scan (in world frame)
     CloudPtr GetCurrentScan() const { return current_scan_; }
@@ -160,6 +171,12 @@ class LIO {
     bool imu_need_init_ = true;
     bool first_scan_ = true;
     int frame_num_ = 0;
+
+    // High-rate IMU-propagated state (lightweight kinematics only, no covariance).
+    // Updated on every AddIMU() call; reset to the corrected IESKF state after Align().
+    mutable std::mutex prop_state_mutex_;
+    Stated prop_state_;
+    Vec3d prop_gravity_{0, 0, -9.81};
 
     // Optional UI
     std::shared_ptr<ui::PangolinWindow> ui_ = nullptr;
