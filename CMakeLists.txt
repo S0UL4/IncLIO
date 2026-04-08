@@ -23,6 +23,7 @@ find_package(sensor_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(std_srvs REQUIRED)
 find_package(pcl_conversions REQUIRED)
 
 # Optional Livox support
@@ -69,6 +70,7 @@ ament_target_dependencies(inclio_ros2_component
   geometry_msgs
   std_msgs
   pcl_conversions
+  std_srvs
 )
 
 if(livox_ros_driver2_FOUND)

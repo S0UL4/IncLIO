@@ -78,6 +78,7 @@ using Mat3d = Eigen::Matrix3d;
 using Mat3f = Eigen::Matrix3f;
 using Vec3d = Eigen::Vector3d;
 using Vec3f = Eigen::Vector3f;
+using Vec3i = Eigen::Vector3i;
 const Vec3d Zero3d(0, 0, 0);
 const Vec3f Zero3f(0, 0, 0);
 

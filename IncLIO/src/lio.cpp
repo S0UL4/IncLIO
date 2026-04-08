@@ -317,7 +317,7 @@ void LIO::Align() {
         delta_pose.so3().log().norm() > math::deg2rad(config_.map_update_angle_th_deg)) {
         INCLIO_INFO("=== delta_pose.translation().norm() {}", delta_pose.translation().norm());
         // CloudPtr current_scan_world(new PointCloudType);
-        pcl::transformPointCloud(*current_scan_filtered, *current_scan_world_, current_pose.matrix());
+        IncLIO::transformCloudOMP(*current_scan_filtered, *current_scan_world_, current_pose.matrix().cast<float>());
         ndt_map_.AddCloud(current_scan_world_);
         last_pose_ = current_pose;
     }

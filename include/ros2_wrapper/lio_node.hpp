@@ -54,9 +54,12 @@
 #include <livox_ros_driver2/msg/custom_msg.hpp>
 #endif
 
+#include <std_srvs/srv/trigger.hpp>
+
 #include <memory>
 #include <mutex>
 #include <deque>
+#include <unordered_map>
 
 
 using namespace std::chrono_literals;
@@ -91,6 +94,10 @@ private:
     void PublishCloud(const rclcpp::Time& stamp, const IncLIO::SE3& pose);
     void PublishTF(const rclcpp::Time& stamp, const IncLIO::SE3& pose);
 
+    // ── Service callbacks ────────────────────────────────────────────────────
+    void SaveMapCallback(const std_srvs::srv::Trigger::Request::SharedPtr req,
+                         std_srvs::srv::Trigger::Response::SharedPtr res);
+
     // ── Shared LiDAR processing (called by CloudCallback / LivoxCallback) ────
     void ProcessCloud(IncLIO::FullCloudPtr cloud, double ts, const rclcpp::Time& stamp);
 
@@ -124,6 +131,7 @@ private:
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_world_pub_;
 
     std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
+    rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr save_map_srv_;
 
     // Path history
     nav_msgs::msg::Path path_msg_;
@@ -136,20 +144,22 @@ private:
     bool publish_path_  = true;
     bool publish_cloud_ = true;
 
-    // Full Map of the environment
-    struct Keyframe {
-    IncLIO::SE3 pose;
-    IncLIO::CloudPtr cloud;
+    // ── Voxelized full map ───────────────────────────────────────────────────
+    // One point per voxel cell — clean, uniform-density, grows over time.
+    // Transform + insert happens on the timer thread, not the lidar callback.
+    struct ScanEntry {
+        IncLIO::CloudPtr cloud;
+        IncLIO::SE3 pose;
     };
+    std::deque<ScanEntry> scan_queue_;
+    std::mutex scan_queue_mutex_;
 
-    IncLIO::CloudPtr local_map_;
-    std::deque<Keyframe> keyframe_queue_;
-    std::mutex keyframe_mutex_;
-
-    // update map 
+    using VoxelMap = std::unordered_map<IncLIO::Vec3i, IncLIO::PointType,
+                                        IncLIO::hash_vec<3>>;
+    VoxelMap full_map_;
+    std::mutex map_mutex_;
     bool map_dirty_ = false;
-    int max_keyframes_ = 10;
-    std::deque<IncLIO::CloudPtr> keyframe_clouds_world_;
+    double map_voxel_size_ = 0.2;
 };
 
 } // namespace inclio_ros2

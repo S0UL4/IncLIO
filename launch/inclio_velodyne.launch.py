@@ -31,12 +31,14 @@ def generate_launch_description():
                               description="Per-point time field scale to seconds"),
         DeclareLaunchArgument("point_filter_num",  default_value="1",
                               description="Keep every N-th point"),
+        DeclareLaunchArgument("map_voxel_size",     default_value="0.1"),
         DeclareLaunchArgument("world_frame",       default_value="world"),
         DeclareLaunchArgument("body_frame",        default_value="body"),
         DeclareLaunchArgument("publish_tf",        default_value="true"),
         DeclareLaunchArgument("publish_path",      default_value="true"),
-        DeclareLaunchArgument("publish_cloud",     default_value="true"),
-    ]
+        DeclareLaunchArgument("publish_cloud",     default_value="true")
+        
+        ]
 
     # ── Node ──────────────────────────────────────────────────────────────────
     node = Node(
@@ -50,6 +52,7 @@ def generate_launch_description():
             "num_scans":        LaunchConfiguration("num_scans"),
             "time_scale":       LaunchConfiguration("time_scale"),
             "point_filter_num": LaunchConfiguration("point_filter_num"),
+            "map_voxel_size":   LaunchConfiguration("map_voxel_size"),
             "world_frame":      LaunchConfiguration("world_frame"),
             "body_frame":       LaunchConfiguration("body_frame"),
             "publish_tf":       LaunchConfiguration("publish_tf"),

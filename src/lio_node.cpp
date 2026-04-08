@@ -14,6 +14,7 @@
 #include <yaml-cpp/yaml.h>
 #include <spdlog/spdlog.h>
 
+#include <pcl/io/pcd_io.h>
 #include <chrono>
 
 namespace inclio_ros2 {
@@ -77,6 +78,9 @@ void LioNode::DeclareParameters() {
     declare_parameter<bool>("publish_tf",    true);
     declare_parameter<bool>("publish_path",  true);
     declare_parameter<bool>("publish_cloud", true);
+
+    // Map visualization
+    declare_parameter<double>("map_voxel_size", 0.2);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -90,6 +94,8 @@ bool LioNode::InitLIO() {
     publish_tf_    = get_parameter("publish_tf").as_bool();
     publish_path_  = get_parameter("publish_path").as_bool();
     publish_cloud_ = get_parameter("publish_cloud").as_bool();
+    map_voxel_size_ = get_parameter("map_voxel_size").as_double();
+
 
     if (config_file_.empty()) {
         RCLCPP_ERROR(get_logger(),
@@ -105,6 +111,20 @@ bool LioNode::InitLIO() {
     imu_converter_.SetIMUCoeff(1.0);  // default (set to 9.81 if using raw accel in m/s²)
 
     RCLCPP_INFO(get_logger(), "Loading IncLIO config: %s", config_file_.c_str());
+
+    // Print parameters for verification
+    std::string lidar_type_str_;
+    lidar_type_str_ = (cc.lidar_type == LidarType::LIVOX) ? "LIVOX" :
+                      (cc.lidar_type == LidarType::VELO32) ? "VELO32" :
+                      (cc.lidar_type == LidarType::OUST64) ? "OUST64" :
+                      (cc.lidar_type == LidarType::HESAI) ? "HESAI" : "UNKNOWN";
+    RCLCPP_INFO(get_logger(), "Config parameters:");
+    RCLCPP_INFO(get_logger(), "  lidar_type: %s", lidar_type_str_.c_str());
+    RCLCPP_INFO(get_logger(), "  num_scans: %d", cc.num_scans);
+    RCLCPP_INFO(get_logger(), "  time_scale: %f", cc.time_scale);
+    RCLCPP_INFO(get_logger(), "  point_filter_num: %d", cc.point_filter_num);
+    RCLCPP_INFO(get_logger(), "  map_voxel_size: %f", map_voxel_size_);
+
 
     // ── Parse YAML to build LIOConfig ─────────────────────────────────────────
     YAML::Node yaml;
@@ -145,8 +165,6 @@ bool LioNode::InitLIO() {
         return false;
     }
 
-    // ── Prepare local map (for visualization) ─────────────────────────────────
-    local_map_.reset(new IncLIO::PointCloudType);
      RCLCPP_INFO(get_logger(), "IncLIO initialized successfully");
 
     return true;
@@ -195,7 +213,7 @@ void LioNode::CreateSubscriptions() {
 #endif
 
       timer_ = this->create_wall_timer(
-      50ms, std::bind(&LioNode::ui_callback, this), timer_group_);
+      10ms, std::bind(&LioNode::ui_callback, this), timer_group_);
 
 }
 
@@ -214,6 +232,11 @@ void LioNode::CreatePublishers() {
     }
 
     path_msg_.header.frame_id = world_frame_;
+
+    save_map_srv_ = create_service<std_srvs::srv::Trigger>(
+        "~/save_map",
+        std::bind(&LioNode::SaveMapCallback, this,
+                  std::placeholders::_1, std::placeholders::_2));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -259,6 +282,22 @@ void LioNode::ImuCallback(sensor_msgs::msg::Imu::UniquePtr msg) {
         odom.twist.twist.linear.z = v_body.z();
 
         odom_fast_pub_->publish(odom);
+
+        // TF at IMU rate — smooth transform for RViz and downstream nodes
+        if (publish_tf_) {
+            geometry_msgs::msg::TransformStamped tf_msg;
+            tf_msg.header.stamp    = msg->header.stamp;
+            tf_msg.header.frame_id = world_frame_;
+            tf_msg.child_frame_id  = body_frame_;
+            tf_msg.transform.translation.x = t.x();
+            tf_msg.transform.translation.y = t.y();
+            tf_msg.transform.translation.z = t.z();
+            tf_msg.transform.rotation.x    = q.x();
+            tf_msg.transform.rotation.y    = q.y();
+            tf_msg.transform.rotation.z    = q.z();
+            tf_msg.transform.rotation.w    = q.w();
+            tf_broadcaster_->sendTransform(tf_msg);
+        }
     } else {
         // Before init: buffer only — ProcessCloud drains these into LIO
         std::lock_guard<std::mutex> lock(imu_buf_mutex_);
@@ -335,7 +374,6 @@ void LioNode::ProcessCloud(IncLIO::FullCloudPtr cloud, double ts,
     PublishOdometry(stamp, pose, state);
     if (publish_path_)  PublishPath(stamp, pose);
     if (publish_cloud_) PublishCloud(stamp, pose);
-    if (publish_tf_)    PublishTF(stamp, pose);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -397,21 +435,13 @@ void LioNode::PublishPath(const rclcpp::Time& stamp, const IncLIO::SE3& pose) {
 // ─────────────────────────────────────────────────────────────────────────────
 // PublishCloud
 // ─────────────────────────────────────────────────────────────────────────────
-void LioNode::PublishCloud(const rclcpp::Time& stamp, const IncLIO::SE3& pose) {
-      auto scan = lio_->GetCurrentScan();                                                                                                                 
-      if (!scan || scan->empty()) return;                                                                                                                 
-      if (!lio_->IsKeyframe(pose)) return;                                                                                                                
-                                                                                                                                                          
-      // Transform to world
-      IncLIO::CloudPtr scan_world(new IncLIO::PointCloudType());                                                                                          
-      pcl::transformPointCloud(*scan, *scan_world, pose.matrix().cast<float>());                                                                          
-                                                                                                                                                          
-      std::lock_guard<std::mutex> lock(keyframe_mutex_);                                                                                                  
-      keyframe_clouds_world_.push_back(scan_world);                                                                                                       
-      if (keyframe_clouds_world_.size() > max_keyframes_)                                                                                                 
-          keyframe_clouds_world_.pop_front();
-      map_dirty_ = true;
+void LioNode::PublishCloud(const rclcpp::Time& /*stamp*/, const IncLIO::SE3& pose) {
+    auto scan = lio_->GetCurrentScan();
+    if (!scan || scan->empty()) return;
 
+    // Cheap enqueue — transform + voxel insert happens on timer thread
+    std::lock_guard<std::mutex> lock(scan_queue_mutex_);
+    scan_queue_.push_back({scan, pose});
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -440,22 +470,90 @@ void LioNode::PublishTF(const rclcpp::Time& stamp, const IncLIO::SE3& pose) {
 // ui_callback  (runs on timer_group_ — doesn't interfere with IMU or LiDAR callbacks)
 // ─────────────────────────────────────────────────────────────────────────────
 void LioNode::ui_callback() {
-      if (!map_dirty_) return;
+    // Drain pending scans — transform + insert into voxel grid
+    {
+        std::deque<ScanEntry> pending;
+        {
+            std::lock_guard<std::mutex> lock(scan_queue_mutex_);
+            pending.swap(scan_queue_);
+        }
 
-      IncLIO::CloudPtr map(new IncLIO::PointCloudType());                                                                                                 
-      {
-          std::lock_guard<std::mutex> lock(keyframe_mutex_);                                                                                              
-          for (auto& cloud : keyframe_clouds_world_)
-              *map += *cloud;                                                                                                                             
-          map_dirty_ = false;
-      }                                                                                                                                                   
-                  
-      sensor_msgs::msg::PointCloud2 msg;                                                                                                                  
-      pcl::toROSMsg(*map, msg);
-      msg.header.stamp = now();                                                                                                                           
-      msg.header.frame_id = world_frame_;
-      cloud_world_pub_->publish(msg);  
+        if (!pending.empty()) {
+            const double inv_voxel = 1.0 / map_voxel_size_;
+            std::lock_guard<std::mutex> lock(map_mutex_);
+            for (const auto& entry : pending) {
+                IncLIO::CloudPtr scan_world(new IncLIO::PointCloudType());
+                IncLIO::transformCloudOMP(*entry.cloud, *scan_world,
+                                          entry.pose.matrix().cast<float>());
+                for (const auto& pt : scan_world->points) {
+                    IncLIO::Vec3i key(
+                        static_cast<int>(std::floor(pt.x * inv_voxel)),
+                        static_cast<int>(std::floor(pt.y * inv_voxel)),
+                        static_cast<int>(std::floor(pt.z * inv_voxel)));
+                    full_map_.insert_or_assign(key, pt);
+                }
+            }
+            map_dirty_ = true;
+        }
+    }
 
+    if (!map_dirty_) return;
+
+    // Extract voxel grid and publish
+    IncLIO::CloudPtr map(new IncLIO::PointCloudType());
+    {
+        std::lock_guard<std::mutex> lock(map_mutex_);
+        map->points.reserve(full_map_.size());
+        for (const auto& [key, pt] : full_map_)
+            map->points.push_back(pt);
+        map_dirty_ = false;
+    }
+    map->width = map->points.size();
+    map->height = 1;
+    map->is_dense = true;
+
+    sensor_msgs::msg::PointCloud2 msg;
+    pcl::toROSMsg(*map, msg);
+    msg.header.stamp = now();
+    msg.header.frame_id = world_frame_;
+    cloud_world_pub_->publish(msg);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SaveMapCallback  (~/save_map service)
+// ─────────────────────────────────────────────────────────────────────────────
+void LioNode::SaveMapCallback(
+    const std_srvs::srv::Trigger::Request::SharedPtr /*req*/,
+    std_srvs::srv::Trigger::Response::SharedPtr res)
+{
+    IncLIO::CloudPtr map(new IncLIO::PointCloudType());
+    {
+        std::lock_guard<std::mutex> lock(map_mutex_);
+        map->points.reserve(full_map_.size());
+        for (const auto& [key, pt] : full_map_)
+            map->points.push_back(pt);
+    }
+    map->width = map->points.size();
+    map->height = 1;
+    map->is_dense = true;
+
+    if (map->empty()) {
+        res->success = false;
+        res->message = "Map is empty, nothing to save";
+        return;
+    }
+
+    std::string path = "/tmp/inclio_map.pcd";
+    if (pcl::io::savePCDFileBinary(path, *map) == 0) {
+        res->success = true;
+        res->message = "Saved " + std::to_string(map->points.size()) +
+                       " points to " + path;
+        RCLCPP_INFO(get_logger(), "%s", res->message.c_str());
+    } else {
+        res->success = false;
+        res->message = "Failed to write " + path;
+        RCLCPP_ERROR(get_logger(), "%s", res->message.c_str());
+    }
 }
 
 } // namespace inclio_ros2

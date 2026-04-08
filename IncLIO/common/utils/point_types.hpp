@@ -7,8 +7,34 @@
 #include <pcl/impl/pcl_base.hpp>
 #include <vector>
 #include <cstdint>
+#include <omp.h>
 
 namespace IncLIO {
+
+/// Fast rigid transform of a PointXYZI cloud using OMP.
+/// Drop-in replacement for pcl::transformPointCloud.
+inline void transformCloudOMP(const pcl::PointCloud<pcl::PointXYZI>& input,
+                              pcl::PointCloud<pcl::PointXYZI>& output,
+                              const Eigen::Matrix4f& T) {
+    output.resize(input.size());
+    output.width  = input.width;
+    output.height = input.height;
+    output.is_dense = input.is_dense;
+
+    const float r00 = T(0,0), r01 = T(0,1), r02 = T(0,2), tx = T(0,3);
+    const float r10 = T(1,0), r11 = T(1,1), r12 = T(1,2), ty = T(1,3);
+    const float r20 = T(2,0), r21 = T(2,1), r22 = T(2,2), tz = T(2,3);
+
+    #pragma omp parallel for schedule(static)
+    for (size_t i = 0; i < input.size(); ++i) {
+        const auto& p = input[i];
+        auto& q = output[i];
+        q.x = r00 * p.x + r01 * p.y + r02 * p.z + tx;
+        q.y = r10 * p.x + r11 * p.y + r12 * p.z + ty;
+        q.z = r20 * p.x + r21 * p.y + r22 * p.z + tz;
+        q.intensity = p.intensity;
+    }
+}
 
 // TODO: Define custom point types used throughout the pipeline
 //       e.g. PointXYZI, PointXYZINormal, FullPointType with ring/time fields
