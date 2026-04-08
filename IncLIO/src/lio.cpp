@@ -334,14 +334,16 @@ void LIO::Align() {
 }
 
 bool LIO::IsKeyframe(const SE3& current_pose) {
-    if (frame_num_ % 10 == 0) {
+    SE3 delta = last_kf_pose_.inverse() * current_pose;
+    bool is_kf = delta.translation().norm() > config_.map_update_dist_th ||
+                  delta.so3().log().norm() > math::deg2rad(config_.map_update_angle_th_deg);
+    if(is_kf || frame_num_ % 10 == 0)
+    {
         INCLIO_INFO("=== keyframe detected, frame_num_ {}", frame_num_);
+        last_kf_pose_ = current_pose;
         return true;
     }
-    SE3 delta = last_kf_pose_.inverse() * current_pose;
-    last_kf_pose_ = current_pose;
-    return delta.translation().norm() > config_.map_update_dist_th ||
-        delta.so3().log().norm() > math::deg2rad(config_.map_update_angle_th_deg);
+    return is_kf;
 }
 
 

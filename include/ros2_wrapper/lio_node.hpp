@@ -1,3 +1,4 @@
+#include <omp.h>
 #pragma once
 
 // lio_node.hpp
@@ -144,6 +145,11 @@ private:
     IncLIO::CloudPtr local_map_;
     std::deque<Keyframe> keyframe_queue_;
     std::mutex keyframe_mutex_;
+
+    // update map 
+    bool map_dirty_ = false;
+    int max_keyframes_ = 10;
+    std::deque<IncLIO::CloudPtr> keyframe_clouds_world_;
 };
 
 } // namespace inclio_ros2
