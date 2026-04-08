@@ -101,7 +101,7 @@ void LIO::AddCloud(FullCloudPtr cloud, double timestamp) {
 }
 
 void LIO::ProcessMeasurements(const MeasureGroup& meas) {
-    INCLIO_INFO("ProcessMeasurements: imu={}, lidar pts={}", meas.imu_.size(), meas.lidar_->size());
+    INCLIO_DEBUG("ProcessMeasurements: imu={}, lidar pts={}", meas.imu_.size(), meas.lidar_->size());
     measures_ = meas;
 
     if (imu_need_init_) {
@@ -125,7 +125,7 @@ void LIO::ProcessMeasurements(const MeasureGroup& meas) {
         prop_gravity_ = ieskf_.GetGravity();
     }
 
-    INCLIO_INFO("Frame {}: Predict {:.3f} ms | Undistort {:.3f} ms | Align {:.3f} ms | Total {:.3f} ms",
+    INCLIO_DEBUG("Frame {}: Predict {:.3f} ms | Undistort {:.3f} ms | Align {:.3f} ms | Total {:.3f} ms",
         frame_num_,
         std::chrono::duration<double, std::milli>(t1 - t0).count(),
         std::chrono::duration<double, std::milli>(t2 - t1).count(),
@@ -315,7 +315,7 @@ void LIO::Align() {
 
     if (delta_pose.translation().norm() > config_.map_update_dist_th ||
         delta_pose.so3().log().norm() > math::deg2rad(config_.map_update_angle_th_deg)) {
-        INCLIO_INFO("=== delta_pose.translation().norm() {}", delta_pose.translation().norm());
+        INCLIO_DEBUG("=== delta_pose.translation().norm() {}", delta_pose.translation().norm());
         // CloudPtr current_scan_world(new PointCloudType);
         IncLIO::transformCloudOMP(*current_scan_filtered, *current_scan_world_, current_pose.matrix().cast<float>());
         ndt_map_.AddCloud(current_scan_world_);
@@ -339,7 +339,7 @@ bool LIO::IsKeyframe(const SE3& current_pose) {
                   delta.so3().log().norm() > math::deg2rad(config_.map_update_angle_th_deg);
     if(is_kf || frame_num_ % 10 == 0)
     {
-        INCLIO_INFO("=== keyframe detected, frame_num_ {}", frame_num_);
+        INCLIO_DEBUG("=== keyframe detected, frame_num_ {}", frame_num_);
         last_kf_pose_ = current_pose;
         return true;
     }

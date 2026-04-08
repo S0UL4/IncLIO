@@ -16,6 +16,14 @@ endif()
 
 set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG")
 
+# In Release, compile out DEBUG/TRACE logs entirely (zero overhead).
+# In Debug, keep everything.
+if(CMAKE_BUILD_TYPE STREQUAL "Release")
+  add_compile_definitions(SPDLOG_ACTIVE_LEVEL=SPDLOG_LEVEL_INFO)
+else()
+  add_compile_definitions(SPDLOG_ACTIVE_LEVEL=SPDLOG_LEVEL_DEBUG)
+endif()
+
 # ─────────────────────────────────────────────
 # Dependencies
 # ─────────────────────────────────────────────
