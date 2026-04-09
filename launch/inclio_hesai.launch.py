@@ -18,15 +18,15 @@ from launch_ros.actions import Node
 def generate_launch_description():
     # ── Declare arguments ─────────────────────────────────────────────────────
     args = [
-        DeclareLaunchArgument("config_file",      default_value="config/velodyne32.yaml",
+        DeclareLaunchArgument("config_file",      default_value="config/hesai128.yaml",
                               description="Path to IncLIO YAML config file"),
         DeclareLaunchArgument("imu_topic",         default_value="/imu_raw",
                               description="IMU topic"),
         DeclareLaunchArgument("lidar_topic",       default_value="/points_raw",
                               description="LiDAR PointCloud2 topic"),
-        DeclareLaunchArgument("lidar_type",        default_value="2",
+        DeclareLaunchArgument("lidar_type",        default_value="4",
                               description="1=Livox  2=Velodyne  3=Ouster 4=Hesai"),
-        DeclareLaunchArgument("num_scans",         default_value="32"),
+        DeclareLaunchArgument("num_scans",         default_value="128"),
         DeclareLaunchArgument("time_scale",        default_value="1e-3",
                               description="Per-point time field scale to seconds"),
         DeclareLaunchArgument("point_filter_num",  default_value="1",
