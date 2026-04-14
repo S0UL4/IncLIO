@@ -16,11 +16,13 @@ from rclpy.node import Node
 from sensor_msgs.msg import PointCloud2
 from sensor_msgs_py.point_cloud2 import read_points
 
+qos = rclpy.qos.QoSProfile(depth=1, reliability=rclpy.qos.ReliabilityPolicy.BEST_EFFORT)
+
 
 class CloudInspector(Node):
     def __init__(self, topic):
         super().__init__("cloud_inspector")
-        self.sub = self.create_subscription(PointCloud2, topic, self.cb, 1)
+        self.sub = self.create_subscription(PointCloud2, topic, self.cb, qos)
         self.get_logger().info(f"Waiting for one message on '{topic}' ...")
 
     def cb(self, msg):
