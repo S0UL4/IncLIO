@@ -1,0 +1,25 @@
+# config/velodyne_ros2.yaml
+# IncLIO config for Velodyne VLP-16 used via ROS2 live topics.
+# Copy / adjust extrinsics for your sensor mount.
+
+preprocess:
+  lidar_type: 3             # 2 = Velodyne / generic PointCloud2
+  scan_line: 128
+  time_scale: 1e6          # Velodyne per-point time field is in seconds×1000
+
+mapping:
+  extrinsic_T: [ 0.002, 0.01, 0.04 ]
+  extrinsic_R: [ -1, 0, 0,
+                0, -1, 0,
+                0, 0, 1 ]
+
+point_filter_num: 1
+max_iteration: 3
+max_static_acce_var: 0.2
+max_static_gyro_var: 0.5
+imu_init_time: 10.0
+
+
+
+# Activating Pangolin viewer, buggy with ROS2 callback groups — disable for now
+with_ui: false              # always false when running under ROS2
