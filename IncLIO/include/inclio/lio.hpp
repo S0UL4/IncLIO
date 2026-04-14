@@ -180,6 +180,7 @@ class LIO {
 
     // Optional UI
     std::shared_ptr<ui::PangolinWindow> ui_ = nullptr;
+    
 };
 
 } // namespace IncLIO

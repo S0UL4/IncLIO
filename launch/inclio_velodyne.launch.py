@@ -24,13 +24,6 @@ def generate_launch_description():
                               description="IMU topic"),
         DeclareLaunchArgument("lidar_topic",       default_value="/points_raw",
                               description="LiDAR PointCloud2 topic"),
-        DeclareLaunchArgument("lidar_type",        default_value="2",
-                              description="1=Livox  2=Velodyne  3=Ouster 4=Hesai"),
-        DeclareLaunchArgument("num_scans",         default_value="32"),
-        DeclareLaunchArgument("time_scale",        default_value="1e-3",
-                              description="Per-point time field scale to seconds"),
-        DeclareLaunchArgument("point_filter_num",  default_value="1",
-                              description="Keep every N-th point"),
         DeclareLaunchArgument("map_voxel_size",     default_value="0.2"),
         DeclareLaunchArgument("world_frame",       default_value="world"),
         DeclareLaunchArgument("body_frame",        default_value="body"),
@@ -48,10 +41,6 @@ def generate_launch_description():
         output="screen",
         parameters=[{
             "config_file":      LaunchConfiguration("config_file"),
-            "lidar_type":       LaunchConfiguration("lidar_type"),
-            "num_scans":        LaunchConfiguration("num_scans"),
-            "time_scale":       LaunchConfiguration("time_scale"),
-            "point_filter_num": LaunchConfiguration("point_filter_num"),
             "map_voxel_size":   LaunchConfiguration("map_voxel_size"),
             "world_frame":      LaunchConfiguration("world_frame"),
             "body_frame":       LaunchConfiguration("body_frame"),
@@ -66,7 +55,7 @@ def generate_launch_description():
             ("inclio/imu",    LaunchConfiguration("imu_topic")),
             ("inclio/points", LaunchConfiguration("lidar_topic")),
         ],
-        prefix=["gdbserver localhost:3000"]    
+        # prefix=["gdbserver localhost:3000"]    
         )
 
     return LaunchDescription(args + [node])

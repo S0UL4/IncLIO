@@ -37,6 +37,12 @@ LIO::LIO(const LIOConfig& config) : config_(config) {
 
     // MessageSync — fires ProcessMeasurements when a synced group is ready
     sync_ = std::make_shared<MessageSync>([this](const MeasureGroup& m) { ProcessMeasurements(m); });
+    if(SPDLOG_ACTIVE_LEVEL == SPDLOG_LEVEL_DEBUG) {
+        InitLogger(spdlog::level::debug);
+    }
+    else if (SPDLOG_ACTIVE_LEVEL == SPDLOG_LEVEL_INFO) {
+        InitLogger(spdlog::level::info);
+    }
 }
 
 bool LIO::Init(const std::string& config_yaml) {

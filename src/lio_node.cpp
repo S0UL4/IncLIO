@@ -64,11 +64,11 @@ void LioNode::DeclareParameters() {
     declare_parameter<std::string>("imu_topic",   "imu");
     declare_parameter<std::string>("lidar_topic", "points");
 
-    // Point cloud conversion (mirrors run_bag.cc CLI / YAML options)
-    declare_parameter<int>   ("lidar_type",        4);     // 1=Livox, 2=Velodyne, 3=Ouster
-    declare_parameter<int>   ("num_scans",         128);
-    declare_parameter<double>("time_scale",        1e-3);
-    declare_parameter<int>   ("point_filter_num",  1);
+    // // Point cloud conversion (mirrors run_bag.cc CLI / YAML options)
+    // declare_parameter<int>   ("lidar_type",        4);     // 1=Livox, 2=Velodyne, 3=Ouster
+    // declare_parameter<int>   ("num_scans",         128);
+    // declare_parameter<double>("time_scale",        1e-3);
+    // declare_parameter<int>   ("point_filter_num",  1);
 
     // Frame ids
     declare_parameter<std::string>("world_frame", "world");
@@ -243,6 +243,7 @@ void LioNode::CreatePublishers() {
 // ImuCallback  (runs on imu_cb_group_ — never blocked by LiDAR processing)
 // ─────────────────────────────────────────────────────────────────────────────
 void LioNode::ImuCallback(sensor_msgs::msg::Imu::UniquePtr msg) {
+    RCLCPP_DEBUG(get_logger(), "Received IMU at time %.3f", msg->header.stamp.sec + msg->header.stamp.nanosec * 1e-9);
     IMUPtr imu_out;
     imu_converter_.Process(*msg, imu_out);
 
@@ -310,6 +311,7 @@ void LioNode::ImuCallback(sensor_msgs::msg::Imu::UniquePtr msg) {
 // ─────────────────────────────────────────────────────────────────────────────
 void LioNode::CloudCallback(sensor_msgs::msg::PointCloud2::UniquePtr msg)
 {
+    RCLCPP_DEBUG(get_logger(), "Received PointCloud2 with %u points", msg->width * msg->height);
     IncLIO::FullCloudPtr pcl_out;
     converter_.Process(*msg, pcl_out);
 

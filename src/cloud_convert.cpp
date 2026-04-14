@@ -42,10 +42,9 @@ void CloudConverter::LoadFromYAML(const std::string &yaml_file) {
 
 void CloudConverter::Process(const sensor_msgs::msg::PointCloud2 & msg, IncLIO::FullCloudPtr &pcl_out) {
     switch (cfg_.lidar_type) {
-        // case LidarType::OUST64:
-        //     Oust64Handler(msg);
-        //     break;
-
+        case LidarType::OUST64:
+            Oust64Handler(msg);
+            break;
         case LidarType::VELO32:
             VelodyneHandler(msg);
             break;
@@ -60,6 +59,41 @@ void CloudConverter::Process(const sensor_msgs::msg::PointCloud2 & msg, IncLIO::
     pcl_out = std::make_shared<IncLIO::FullPointCloudType>(cloud_out_);
     //*pcl_out = cloud_out_;
 }
+
+void CloudConverter::Oust64Handler(const sensor_msgs::msg::PointCloud2 &msg) {
+    cloud_out_.clear();
+    pcl::PointCloud<ouster_ros::Point> pl_orig;
+    pcl::fromROSMsg(msg, pl_orig);
+    const int plsize = pl_orig.size();
+    if (plsize == 0) return;
+
+    // Pass 1: collect surviving indices (every N-th point, range > 4 m).
+    std::vector<int> kept;
+    kept.reserve(plsize / cfg_.point_filter_num + 1);
+    for (int i = 0; i < plsize; i += cfg_.point_filter_num) {
+        const auto& p = pl_orig.points[i];
+        if (p.x * p.x + p.y * p.y + p.z * p.z >= 16.0f)
+            kept.push_back(i);
+    }
+    cloud_out_.resize(kept.size());
+
+    // Pass 2: parallel write into pre-sized buffer.
+    #pragma omp parallel for schedule(static)
+    for (size_t j = 0; j < kept.size(); j++) {
+        const int i = kept[j];
+        auto& added_pt = cloud_out_.points[j];
+        added_pt.x = pl_orig.points[i].x;
+        added_pt.y = pl_orig.points[i].y;
+        added_pt.z = pl_orig.points[i].z;
+        added_pt.intensity = pl_orig.points[i].intensity;
+        added_pt.time = pl_orig.points[i].t / cfg_.time_scale;
+    }
+
+    cloud_out_.width = cloud_out_.size();
+    cloud_out_.height = 1;
+    cloud_out_.is_dense = true;
+}
+
 
 
 void CloudConverter::HesaiHandler(const sensor_msgs::msg::PointCloud2 & msg) {

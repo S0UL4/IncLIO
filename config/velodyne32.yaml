@@ -13,7 +13,7 @@ mapping:
                 0, 1, 0,
                 0, 0, 1 ]
 
-point_filter_num: 10
+point_filter_num: 1
 max_iteration: 3
 max_static_acce_var: 0.2
 max_static_gyro_var: 0.5
