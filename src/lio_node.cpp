@@ -106,9 +106,9 @@ bool LioNode::InitLIO() {
 
     // ── Configure point cloud converter ──────────────────────────────────────
     converter_.LoadFromYAML(config_file_);  // override with YAML values if present
-    CloudConvertConfig cc = converter_.Config();
+    cc = converter_.Config();
     // converter_.SetConfig(cc);
-    imu_converter_.SetIMUCoeff(1.0);  // default (set to 9.81 if using raw accel in m/s²)
+    imu_converter_.SetIMUCoeff(cc.imu_coeff);  // default (set to 9.81 if using raw accel in m/s²)
 
     RCLCPP_INFO(get_logger(), "Loading IncLIO config: %s", config_file_.c_str());
 
@@ -196,22 +196,27 @@ void LioNode::CreateSubscriptions() {
     // LiDAR — PointCloud2
     const auto cloud_qos = rclcpp::SensorDataQoS();
     std::string lidar_topic = get_parameter("lidar_topic").as_string();
+    if(cc.lidar_type != LidarType::LIVOX)
+    {
     cloud_sub_ = create_subscription<sensor_msgs::msg::PointCloud2>(
         lidar_topic, cloud_qos,
         [this](sensor_msgs::msg::PointCloud2::UniquePtr msg) { CloudCallback(std::move(msg)); },
         lidar_opts);
 
     RCLCPP_INFO(get_logger(), "Subscribing to PointCloud2: %s", lidar_topic.c_str());
+    }
+    else 
+    {
+    #ifdef HAVE_LIVOX_ROS_DRIVER2
+        livox_sub_ = create_subscription<livox_ros_driver2::msg::CustomMsg>(
+            lidar_topic, cloud_qos,
+            [this](const livox_ros_driver2::msg::CustomMsg::SharedPtr msg) { LivoxCallback(msg); },
+            lidar_opts);
 
-#ifdef HAVE_LIVOX_ROS_DRIVER2
-    livox_sub_ = create_subscription<livox_ros_driver2::msg::CustomMsg>(
-        "~/points_livox", cloud_qos,
-        [this](const livox_ros_driver2::msg::CustomMsg::SharedPtr msg) { LivoxCallback(msg); },
-        lidar_opts);
+            RCLCPP_INFO(get_logger(), "Subscribing to custom msg: %s", lidar_topic.c_str());
 
-    RCLCPP_INFO(get_logger(), "Subscribing to Livox CustomMsg: ~/points_livox");
-#endif
-
+    #endif
+    }
       timer_ = this->create_wall_timer(
       10ms, std::bind(&LioNode::ui_callback, this), timer_group_);
 
@@ -333,16 +338,18 @@ void LioNode::CloudCallback(sensor_msgs::msg::PointCloud2::UniquePtr msg)
 // ─────────────────────────────────────────────────────────────────────────────
 #ifdef HAVE_LIVOX_ROS_DRIVER2
 void LioNode::LivoxCallback(const livox_ros_driver2::msg::CustomMsg::SharedPtr msg) {
-    auto cloud = converter_.Convert(*msg);
-    if (!cloud || cloud->empty()) {
+    IncLIO::FullCloudPtr pcl_out;
+    converter_.Process(*msg,pcl_out);
+    if (!pcl_out || pcl_out->empty()) {
         RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000,
             "Empty Livox CustomMsg received");
         return;
     }
 
     double ts = msg->header.stamp.sec + msg->header.stamp.nanosec * 1e-9;
-    ProcessCloud(cloud, ts, msg->header.stamp);
+    ProcessCloud(pcl_out, ts, msg->header.stamp);
 }
+
 #endif
 
 // ─────────────────────────────────────────────────────────────────────────────

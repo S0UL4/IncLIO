@@ -27,7 +27,7 @@ find_package(std_srvs REQUIRED)
 find_package(pcl_conversions REQUIRED)
 
 # Optional Livox support
-find_package(livox_ros_driver2 QUIET)
+find_package(livox_ros_driver2 REQUIRED)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # IncLIO core — built directly from source inside this package.

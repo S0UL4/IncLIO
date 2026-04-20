@@ -3,11 +3,12 @@
 
 preprocess:
   lidar_type: 1
-  scan_line: 4
-  time_scale: 1e-6           # Livox offset_time is in nanoseconds
+  scan_line: 6
+  time_scale: 1e6           # Livox offset_time is in nanoseconds
+  imu_coeff: 1.0                # set to 9.81 if using raw accel in m/s²
 
 mapping:
-  extrinsic_T: [ 0.04165, 0.02326, -0.0284 ]
+  extrinsic_T: [ -0.011, -0.02329, 0.04412 ]
   extrinsic_R: [ 1, 0, 0,
                  0, 1, 0,
                  0, 0, 1 ]
@@ -19,4 +20,4 @@ with_ui: false
 
 max_static_acce_var: 0.05
 max_static_gyro_var: 0.01
-imu_init_time: 3.0
+imu_init_time: 7.0

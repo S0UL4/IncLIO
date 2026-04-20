@@ -160,6 +160,9 @@ private:
     std::mutex map_mutex_;
     bool map_dirty_ = false;
     double map_voxel_size_ = 0.2;
+
+    // CloudConvertConfig 
+    CloudConvertConfig cc;
 };
 
 } // namespace inclio_ros2

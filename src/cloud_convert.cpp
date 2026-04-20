@@ -21,6 +21,7 @@ void CloudConverter::LoadFromYAML(const std::string &yaml_file) {
     int lidar_type = yaml["preprocess"]["lidar_type"].as<int>();
     cfg_.num_scans = yaml["preprocess"]["scan_line"].as<int>();
     cfg_.point_filter_num = yaml["point_filter_num"].as<int>();
+    cfg_.imu_coeff = yaml["preprocess"]["imu_coeff"].as<double>();
 
     if (lidar_type == 1) {
         cfg_.lidar_type = LidarType::LIVOX;
@@ -60,6 +61,19 @@ void CloudConverter::Process(const sensor_msgs::msg::PointCloud2 & msg, IncLIO::
     //*pcl_out = cloud_out_;
 }
 
+
+void CloudConverter::Process(const livox_ros_driver2::msg::CustomMsg &msg, IncLIO::FullCloudPtr &pcl_out) {
+    switch (cfg_.lidar_type) {
+        case LidarType::LIVOX:
+            AviaHandler(msg);
+            break;
+        default:
+            RCLCPP_ERROR(rclcpp::get_logger("CloudConverter"), "Error LiDAR Type: %d", int(cfg_.lidar_type));
+            break;
+    }
+    pcl_out = std::make_shared<IncLIO::FullPointCloudType>(cloud_out_);
+}
+
 void CloudConverter::Oust64Handler(const sensor_msgs::msg::PointCloud2 &msg) {
     cloud_out_.clear();
     pcl::PointCloud<ouster_ros::Point> pl_orig;
@@ -92,6 +106,48 @@ void CloudConverter::Oust64Handler(const sensor_msgs::msg::PointCloud2 &msg) {
     cloud_out_.width = cloud_out_.size();
     cloud_out_.height = 1;
     cloud_out_.is_dense = true;
+}
+
+
+void CloudConverter::AviaHandler(const livox_ros_driver2::msg::CustomMsg &msg) {
+    cloud_out_.clear();
+    IncLIO::FullPointCloudType cloud_temp;
+    cloud_temp.clear();
+    int plsize = msg.point_num;
+
+    cloud_out_.reserve(plsize);
+    cloud_temp.resize(plsize);
+
+    std::vector<bool> is_valid_pt(plsize, false);
+    std::vector<uint> index(plsize - 1);
+    for (uint i = 0; i < plsize - 1; ++i) {
+        index[i] = i + 1;  // 从1开始
+    }
+
+    std::for_each(std::execution::par_unseq, index.begin(), index.end(), [&](const uint &i) {
+        if ((msg.points[i].line < cfg_.num_scans) &&
+            ((msg.points[i].tag & 0x30) == 0x10 || (msg.points[i].tag & 0x30) == 0x00)) {
+            if (i % cfg_.point_filter_num == 0) {
+                cloud_temp.points[i].x = msg.points[i].x;
+                cloud_temp.points[i].y = msg.points[i].y;
+                cloud_temp.points[i].z = msg.points[i].z;
+                cloud_temp.points[i].intensity = msg.points[i].reflectivity;
+                cloud_temp.points[i].time = msg.points[i].offset_time / float(cfg_.time_scale);
+
+                if ((abs(cloud_temp.points[i].x - cloud_temp.points[i - 1].x) > 1e-7) ||
+                    (abs(cloud_temp.points[i].y - cloud_temp.points[i - 1].y) > 1e-7) ||
+                    (abs(cloud_temp.points[i].z - cloud_temp.points[i - 1].z) > 1e-7)) {
+                    is_valid_pt[i] = true;
+                }
+            }
+        }
+    });
+
+    for (uint i = 1; i < plsize; i++) {
+        if (is_valid_pt[i]) {
+            cloud_out_.points.push_back(cloud_temp.points[i]);
+        }
+    }
 }
 
 

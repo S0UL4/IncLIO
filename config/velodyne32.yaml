@@ -6,6 +6,7 @@ preprocess:
   lidar_type: 2             # 2 = Velodyne / generic PointCloud2
   scan_line: 32
   time_scale: 1e-3          # Velodyne per-point time field is in seconds×1000
+  imu_coeff: 1.0
 
 mapping:
   extrinsic_T: [ 0, 0, 0.28 ]

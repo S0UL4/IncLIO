@@ -46,6 +46,7 @@ struct CloudConvertConfig {
     int    num_scans        = 128;    // number of scan lines (rings)
     double time_scale       = 1e-3;  // per-point time field scale to seconds
     int    point_filter_num = 1;     // keep every N-th point (1 = keep all)
+    double imu_coeff        = 1.0;   // coefficient to apply to IMU data (e.g. 9.81 if using raw accel in m/s²)
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -74,7 +75,7 @@ public:
 
 
 #ifdef HAVE_LIVOX_ROS_DRIVER2
-    void Process(livox_ros_driver2::msg::CustomMsg::UniquePtr msg, IncLIO::FullCloudPtr &pcl_out);
+    void Process(const livox_ros_driver2::msg::CustomMsg &msg, IncLIO::FullCloudPtr &pcl_out);
 #endif
 
 private:
@@ -83,7 +84,7 @@ private:
     void HesaiHandler(const sensor_msgs::msg::PointCloud2 & msg);
 
 #ifdef HAVE_LIVOX_ROS_DRIVER2
-    void LivoxHandler(livox_ros_driver2::msg::CustomMsg::UniquePtr msg);
+    void AviaHandler(const livox_ros_driver2::msg::CustomMsg &msg);
 #endif
 
     CloudConvertConfig cfg_;
