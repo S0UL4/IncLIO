@@ -30,7 +30,10 @@ def generate_launch_description():
         DeclareLaunchArgument("lidar_topic",       default_value="/livox/lidar",
                               description="LiDAR PointCloud2 topic"),
         DeclareLaunchArgument("map_voxel_size",     default_value="0.05"),
-        DeclareLaunchArgument("local_map_scans",     default_value="200"), # number of scans in local map
+        DeclareLaunchArgument("local_map_scans",     default_value="20"), # number of scans in local map ( increasing this will increase accuracy but also CPU usage so the system may fail to run in real-time )
+        DeclareLaunchArgument("publish_voxel_size",     default_value="0.1"), # voxel size for published point cloud ( increasing this will increase accuracy but also CPU usage so the system may fail to run in real-time )
+        DeclareLaunchArgument("publish_radius",     default_value="80.0"),    # crop radius around current pose
+        DeclareLaunchArgument("publish_rate_hz",     default_value="10.0"), #
         DeclareLaunchArgument("world_frame",       default_value="world"),
         DeclareLaunchArgument("body_frame",        default_value="body"),
         DeclareLaunchArgument("publish_tf",        default_value="true"),
@@ -50,6 +53,9 @@ def generate_launch_description():
             "config_file":      LaunchConfiguration("config_file"),
             "map_voxel_size":   LaunchConfiguration("map_voxel_size"),
             "local_map_scans":  LaunchConfiguration("local_map_scans"),
+            "publish_voxel_size":  LaunchConfiguration("publish_voxel_size"),
+            "publish_radius":  LaunchConfiguration("publish_radius"),
+            "publish_rate_hz":  LaunchConfiguration("publish_rate_hz"),
             "world_frame":      LaunchConfiguration("world_frame"),
             "body_frame":       LaunchConfiguration("body_frame"),
             "publish_tf":       LaunchConfiguration("publish_tf"),

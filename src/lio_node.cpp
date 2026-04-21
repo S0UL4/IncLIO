@@ -81,7 +81,10 @@ void LioNode::DeclareParameters() {
 
     // Map visualization
     declare_parameter<double>("map_voxel_size", 0.2);
-    declare_parameter<int>("local_map_scans", 20);  // number of recent scans to publish as local map
+    declare_parameter<int>("local_map_scans", 20);       // recent scans in the local map window
+    declare_parameter<double>("publish_voxel_size", 0.1); // per-scan voxel for the local window
+    declare_parameter<double>("publish_radius", 80.0);    // crop radius around current pose
+    declare_parameter<double>("publish_rate_hz", 5.0);    // ~/cloud_world publish rate
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -97,6 +100,9 @@ bool LioNode::InitLIO() {
     publish_cloud_ = get_parameter("publish_cloud").as_bool();
     map_voxel_size_ = get_parameter("map_voxel_size").as_double();
     local_map_max_scans_ = get_parameter("local_map_scans").as_int();
+    publish_voxel_size_ = get_parameter("publish_voxel_size").as_double();
+    publish_radius_ = get_parameter("publish_radius").as_double();
+    publish_rate_hz_ = get_parameter("publish_rate_hz").as_double();
 
 
     if (config_file_.empty()) {
@@ -219,8 +225,11 @@ void LioNode::CreateSubscriptions() {
 
     #endif
     }
-      timer_ = this->create_wall_timer(
-      10ms, std::bind(&LioNode::ui_callback, this), timer_group_);
+    const double hz = std::max(0.5, publish_rate_hz_);
+    const auto period_ns = std::chrono::nanoseconds(
+        static_cast<int64_t>(1.0e9 / hz));
+    timer_ = this->create_wall_timer(
+        period_ns, std::bind(&LioNode::ui_callback, this), timer_group_);
 
 }
 
@@ -481,55 +490,89 @@ void LioNode::PublishTF(const rclcpp::Time& stamp, const IncLIO::SE3& pose) {
 // ui_callback  (runs on timer_group_ — doesn't interfere with IMU or LiDAR callbacks)
 // ─────────────────────────────────────────────────────────────────────────────
 void LioNode::ui_callback() {
-    // Drain pending scans — transform, insert into full_map_, push to sliding window
+    // 1) Drain pending scans from the lidar thread.
+    std::deque<ScanEntry> pending;
     {
-        std::deque<ScanEntry> pending;
-        {
-            std::lock_guard<std::mutex> lock(scan_queue_mutex_);
-            pending.swap(scan_queue_);
-        }
+        std::lock_guard<std::mutex> lock(scan_queue_mutex_);
+        pending.swap(scan_queue_);
+    }
 
-        if (!pending.empty()) {
-            const double inv_voxel = 1.0 / map_voxel_size_;
-            for (const auto& entry : pending) {
-                IncLIO::CloudPtr scan_world(new IncLIO::PointCloudType());
-                IncLIO::transformCloudOMP(*entry.cloud, *scan_world,
-                                          entry.pose.matrix().cast<float>());
+    bool updated = false;
+    if (!pending.empty()) {
+        const double inv_full = 1.0 / map_voxel_size_;
+        const double inv_pub  = 1.0 / publish_voxel_size_;
 
-                // Accumulate into full_map_ — used only by the save service
-                {
-                    std::lock_guard<std::mutex> lock(map_mutex_);
-                    for (const auto& pt : scan_world->points) {
-                        IncLIO::Vec3i key(
-                            static_cast<int>(std::floor(pt.x * inv_voxel)),
-                            static_cast<int>(std::floor(pt.y * inv_voxel)),
-                            static_cast<int>(std::floor(pt.z * inv_voxel)));
-                        full_map_.insert_or_assign(key, pt);
-                    }
+        for (const auto& entry : pending) {
+            IncLIO::CloudPtr scan_world(new IncLIO::PointCloudType());
+            IncLIO::transformCloudOMP(*entry.cloud, *scan_world,
+                                      entry.pose.matrix().cast<float>());
+
+            // Accumulate into full_map_ — used only by the save service.
+            {
+                std::lock_guard<std::mutex> lock(map_mutex_);
+                for (const auto& pt : scan_world->points) {
+                    IncLIO::Vec3i key(
+                        static_cast<int>(std::floor(pt.x * inv_full)),
+                        static_cast<int>(std::floor(pt.y * inv_full)),
+                        static_cast<int>(std::floor(pt.z * inv_full)));
+                    full_map_.insert_or_assign(key, pt);
                 }
-
-                // Bounded sliding window for local map visualization
-                local_scan_window_.push_back(scan_world);
-                if (static_cast<int>(local_scan_window_.size()) > local_map_max_scans_)
-                    local_scan_window_.pop_front();
             }
-            map_dirty_ = true;
+
+            // Per-scan voxelization before storing in the viz window: keeps
+            // the published payload bounded even with a large scan history.
+            std::unordered_map<IncLIO::Vec3i, IncLIO::PointType,
+                               IncLIO::hash_vec<3>> voxels;
+            voxels.reserve(scan_world->points.size() / 4 + 16);
+            for (const auto& pt : scan_world->points) {
+                IncLIO::Vec3i key(
+                    static_cast<int>(std::floor(pt.x * inv_pub)),
+                    static_cast<int>(std::floor(pt.y * inv_pub)),
+                    static_cast<int>(std::floor(pt.z * inv_pub)));
+                voxels.emplace(key, pt);
+            }
+
+            IncLIO::CloudPtr scan_voxelized(new IncLIO::PointCloudType());
+            scan_voxelized->points.reserve(voxels.size());
+            for (const auto& kv : voxels) scan_voxelized->points.push_back(kv.second);
+            scan_voxelized->width  = scan_voxelized->points.size();
+            scan_voxelized->height = 1;
+            scan_voxelized->is_dense = true;
+
+            local_scan_window_.push_back(scan_voxelized);
+            if (static_cast<int>(local_scan_window_.size()) > local_map_max_scans_)
+                local_scan_window_.pop_front();
+
+            current_pose_ = entry.pose;
+            updated = true;
         }
     }
 
-    if (!map_dirty_) return;
-    map_dirty_ = false;
+    if (!updated) return;
 
-    // Publish local map: concatenate the recent scan window (bounded size, no full_map_ iteration)
+    // 2) Publish local map: crop the window around the current pose.
+    const auto& c = current_pose_.translation();
+    const float cx = static_cast<float>(c.x());
+    const float cy = static_cast<float>(c.y());
+    const float cz = static_cast<float>(c.z());
+    const float r2 = static_cast<float>(publish_radius_ * publish_radius_);
+
     IncLIO::CloudPtr local_map(new IncLIO::PointCloudType());
     size_t total_pts = 0;
     for (const auto& sc : local_scan_window_) total_pts += sc->points.size();
     local_map->points.reserve(total_pts);
-    for (const auto& sc : local_scan_window_)
-        local_map->points.insert(local_map->points.end(),
-                                 sc->points.begin(), sc->points.end());
-    local_map->width  = local_map->points.size();
-    local_map->height = 1;
+
+    for (const auto& sc : local_scan_window_) {
+        for (const auto& pt : sc->points) {
+            const float dx = pt.x - cx;
+            const float dy = pt.y - cy;
+            const float dz = pt.z - cz;
+            if (dx*dx + dy*dy + dz*dz <= r2)
+                local_map->points.push_back(pt);
+        }
+    }
+    local_map->width    = local_map->points.size();
+    local_map->height   = 1;
     local_map->is_dense = true;
 
     sensor_msgs::msg::PointCloud2 msg;

@@ -158,13 +158,22 @@ private:
                                         IncLIO::hash_vec<3>>;
     VoxelMap full_map_;
     std::mutex map_mutex_;
-    bool map_dirty_ = false;
     double map_voxel_size_ = 0.2;
 
     // Sliding window of recent world-frame scans for local map visualization.
+    // Scans are pre-voxelized at publish_voxel_size_ before insertion so the
+    // window can hold more history without exploding the publish payload.
     // Only accessed from ui_callback (timer_group_, MutuallyExclusive) — no mutex needed.
     std::deque<IncLIO::CloudPtr> local_scan_window_;
     int local_map_max_scans_ = 20;
+
+    // Visualization publish config — decoupled from LIO update rate.
+    double publish_voxel_size_ = 0.3;   // per-scan voxel size for the local window
+    double publish_radius_     = 80.0;  // crop around current pose at publish
+    double publish_rate_hz_    = 5.0;   // ~/cloud_world publish rate
+
+    // Latest corrected pose from the lidar thread — used as the crop center.
+    IncLIO::SE3 current_pose_;
 
     // CloudConvertConfig 
     CloudConvertConfig cc;
