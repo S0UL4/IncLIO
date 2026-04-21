@@ -3,43 +3,37 @@
 namespace IncLIO {
 
 bool MessageSync::Sync() {
-    if (lidar_buffer_.empty() || imu_buffer_.empty()) {
-        return false;
-    }
+    if (lidar_buffer_.empty()) return false;
 
     if (!lidar_pushed_) {
         measures_.lidar_ = lidar_buffer_.front();
         measures_.lidar_begin_time_ = time_buffer_.front();
-
-        // points.back().time is a relative offset in milliseconds from scan start;
-        // convert to seconds and add to the scan begin time.
+        // points.back().time is a relative offset in milliseconds from scan start
         lidar_end_time_ = measures_.lidar_begin_time_ + measures_.lidar_->points.back().time * 1e-3;
         measures_.lidar_end_time_ = lidar_end_time_;
         lidar_pushed_ = true;
     }
 
-    if (last_timestamp_imu_ < lidar_end_time_) {
-        return false;
-    }
+    // Drain imu_buffer_ under the mutex (shared with ProcessIMU on the IMU thread).
+    // Release the lock before the heavy callback so ProcessIMU never blocks long.
+    {
+        std::lock_guard<std::mutex> lock(imu_buf_mutex_);
+        if (imu_buffer_.empty() || last_timestamp_imu_ < lidar_end_time_) return false;
 
-     double imu_time = imu_buffer_.front()->timestamp_;
-    measures_.imu_.clear();
-    while (!imu_buffer_.empty() && imu_time < lidar_end_time_) {
-        imu_time = imu_buffer_.front()->timestamp_;
-        if (imu_time > lidar_end_time_) {
-            break;
+        measures_.imu_.clear();
+        while (!imu_buffer_.empty()) {
+            double imu_time = imu_buffer_.front()->timestamp_;
+            if (imu_time > lidar_end_time_) break;
+            measures_.imu_.push_back(imu_buffer_.front());
+            imu_buffer_.pop_front();
         }
-        measures_.imu_.push_back(imu_buffer_.front());
-        imu_buffer_.pop_front();
     }
 
-     lidar_buffer_.pop_front();
+    lidar_buffer_.pop_front();
     time_buffer_.pop_front();
     lidar_pushed_ = false;
 
-    if (callback_) {
-        callback_(measures_);
-    }
+    if (callback_) callback_(measures_);
 
     return true;
 }

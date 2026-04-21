@@ -81,6 +81,7 @@ void LioNode::DeclareParameters() {
 
     // Map visualization
     declare_parameter<double>("map_voxel_size", 0.2);
+    declare_parameter<int>("local_map_scans", 20);  // number of recent scans to publish as local map
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -95,6 +96,7 @@ bool LioNode::InitLIO() {
     publish_path_  = get_parameter("publish_path").as_bool();
     publish_cloud_ = get_parameter("publish_cloud").as_bool();
     map_voxel_size_ = get_parameter("map_voxel_size").as_double();
+    local_map_max_scans_ = get_parameter("local_map_scans").as_int();
 
 
     if (config_file_.empty()) {
@@ -479,7 +481,7 @@ void LioNode::PublishTF(const rclcpp::Time& stamp, const IncLIO::SE3& pose) {
 // ui_callback  (runs on timer_group_ — doesn't interfere with IMU or LiDAR callbacks)
 // ─────────────────────────────────────────────────────────────────────────────
 void LioNode::ui_callback() {
-    // Drain pending scans — transform + insert into voxel grid
+    // Drain pending scans — transform, insert into full_map_, push to sliding window
     {
         std::deque<ScanEntry> pending;
         {
@@ -489,41 +491,50 @@ void LioNode::ui_callback() {
 
         if (!pending.empty()) {
             const double inv_voxel = 1.0 / map_voxel_size_;
-            std::lock_guard<std::mutex> lock(map_mutex_);
             for (const auto& entry : pending) {
                 IncLIO::CloudPtr scan_world(new IncLIO::PointCloudType());
                 IncLIO::transformCloudOMP(*entry.cloud, *scan_world,
                                           entry.pose.matrix().cast<float>());
-                for (const auto& pt : scan_world->points) {
-                    IncLIO::Vec3i key(
-                        static_cast<int>(std::floor(pt.x * inv_voxel)),
-                        static_cast<int>(std::floor(pt.y * inv_voxel)),
-                        static_cast<int>(std::floor(pt.z * inv_voxel)));
-                    full_map_.insert_or_assign(key, pt);
+
+                // Accumulate into full_map_ — used only by the save service
+                {
+                    std::lock_guard<std::mutex> lock(map_mutex_);
+                    for (const auto& pt : scan_world->points) {
+                        IncLIO::Vec3i key(
+                            static_cast<int>(std::floor(pt.x * inv_voxel)),
+                            static_cast<int>(std::floor(pt.y * inv_voxel)),
+                            static_cast<int>(std::floor(pt.z * inv_voxel)));
+                        full_map_.insert_or_assign(key, pt);
+                    }
                 }
+
+                // Bounded sliding window for local map visualization
+                local_scan_window_.push_back(scan_world);
+                if (static_cast<int>(local_scan_window_.size()) > local_map_max_scans_)
+                    local_scan_window_.pop_front();
             }
             map_dirty_ = true;
         }
     }
 
     if (!map_dirty_) return;
+    map_dirty_ = false;
 
-    // Extract voxel grid and publish
-    IncLIO::CloudPtr map(new IncLIO::PointCloudType());
-    {
-        std::lock_guard<std::mutex> lock(map_mutex_);
-        map->points.reserve(full_map_.size());
-        for (const auto& [key, pt] : full_map_)
-            map->points.push_back(pt);
-        map_dirty_ = false;
-    }
-    map->width = map->points.size();
-    map->height = 1;
-    map->is_dense = true;
+    // Publish local map: concatenate the recent scan window (bounded size, no full_map_ iteration)
+    IncLIO::CloudPtr local_map(new IncLIO::PointCloudType());
+    size_t total_pts = 0;
+    for (const auto& sc : local_scan_window_) total_pts += sc->points.size();
+    local_map->points.reserve(total_pts);
+    for (const auto& sc : local_scan_window_)
+        local_map->points.insert(local_map->points.end(),
+                                 sc->points.begin(), sc->points.end());
+    local_map->width  = local_map->points.size();
+    local_map->height = 1;
+    local_map->is_dense = true;
 
     sensor_msgs::msg::PointCloud2 msg;
-    pcl::toROSMsg(*map, msg);
-    msg.header.stamp = now();
+    pcl::toROSMsg(*local_map, msg);
+    msg.header.stamp    = now();
     msg.header.frame_id = world_frame_;
     cloud_world_pub_->publish(msg);
 }

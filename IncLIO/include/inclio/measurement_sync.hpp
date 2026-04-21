@@ -7,6 +7,7 @@
 
 #include <deque>
 #include <functional>
+#include <mutex>
 
 namespace IncLIO {
 
@@ -47,8 +48,9 @@ class MessageSync {
     /// Initialize from YAML config
     void Init(const std::string& yaml);
 
-    /// Buffer an IMU measurement
+    /// Buffer an IMU measurement (thread-safe — called from IMU callback thread)
     void ProcessIMU(IMUPtr imu) {
+        std::lock_guard<std::mutex> lock(imu_buf_mutex_);
         double timestamp = imu->timestamp_;
         if (timestamp < last_timestamp_imu_) {
             INCLIO_WARN("IMU loop back, clearing buffer");
@@ -80,13 +82,16 @@ class MessageSync {
 
     Callback callback_;
     std::deque<FullCloudPtr> lidar_buffer_;
-    std::deque<IMUPtr> imu_buffer_;
-    double last_timestamp_imu_ = -1.0;
-    double last_timestamp_lidar_ = 0;
     std::deque<double> time_buffer_;
     bool lidar_pushed_ = false;
     MeasureGroup measures_;
     double lidar_end_time_ = 0;
+    double last_timestamp_lidar_ = 0;
+
+    // Protected by imu_buf_mutex_: accessed from both the IMU and lidar callback threads.
+    mutable std::mutex imu_buf_mutex_;
+    std::deque<IMUPtr> imu_buffer_;
+    double last_timestamp_imu_ = -1.0;
 };
 
 } // namespace IncLIO

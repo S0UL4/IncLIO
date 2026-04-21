@@ -161,6 +161,11 @@ private:
     bool map_dirty_ = false;
     double map_voxel_size_ = 0.2;
 
+    // Sliding window of recent world-frame scans for local map visualization.
+    // Only accessed from ui_callback (timer_group_, MutuallyExclusive) — no mutex needed.
+    std::deque<IncLIO::CloudPtr> local_scan_window_;
+    int local_map_max_scans_ = 20;
+
     // CloudConvertConfig 
     CloudConvertConfig cc;
 };

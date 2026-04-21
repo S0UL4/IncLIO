@@ -25,6 +25,8 @@ def generate_launch_description():
         DeclareLaunchArgument("lidar_topic",       default_value="/astra_lidar/data_filtered",
                               description="LiDAR PointCloud2 topic"),
         DeclareLaunchArgument("map_voxel_size",     default_value="0.2"),
+        DeclareLaunchArgument("local_map_scans",     default_value="500"), # number of scans in local map
+
         DeclareLaunchArgument("world_frame",       default_value="world"),
         DeclareLaunchArgument("body_frame",        default_value="body"),
         DeclareLaunchArgument("publish_tf",        default_value="true"),
@@ -42,6 +44,7 @@ def generate_launch_description():
         parameters=[{
             "config_file":      LaunchConfiguration("config_file"),
             "map_voxel_size":   LaunchConfiguration("map_voxel_size"),
+            "local_map_scans":  LaunchConfiguration("local_map_scans"),
             "world_frame":      LaunchConfiguration("world_frame"),
             "body_frame":       LaunchConfiguration("body_frame"),
             "publish_tf":       LaunchConfiguration("publish_tf"),

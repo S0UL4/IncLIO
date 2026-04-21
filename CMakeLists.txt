@@ -27,7 +27,7 @@ find_package(std_srvs REQUIRED)
 find_package(pcl_conversions REQUIRED)
 
 # Optional Livox support
-find_package(livox_ros_driver2 REQUIRED)
+find_package(livox_ros_driver2 QUIET)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # IncLIO core — built directly from source inside this package.
@@ -74,7 +74,7 @@ ament_target_dependencies(inclio_ros2_component
 )
 
 if(livox_ros_driver2_FOUND)
-  target_compile_definitions(inclio_ros2_component PRIVATE HAVE_LIVOX_ROS_DRIVER2)
+  target_compile_definitions(inclio_ros2_component PUBLIC HAVE_LIVOX_ROS_DRIVER2)
   ament_target_dependencies(inclio_ros2_component livox_ros_driver2)
 endif()
 
