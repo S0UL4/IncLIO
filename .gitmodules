@@ -1,3 +1,6 @@
 [submodule "IncLIO/thirdparty/Pangolin"]
 	path = IncLIO/thirdparty/Pangolin
 	url = https://github.com/stevenlovegrove/Pangolin.git
+[submodule "3rdparty/Bonxai"]
+	path = 3rdparty/Bonxai
+	url = https://github.com/facontidavide/Bonxai.git

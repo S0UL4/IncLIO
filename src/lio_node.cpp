@@ -80,9 +80,8 @@ void LioNode::DeclareParameters() {
     declare_parameter<bool>("publish_cloud", true);
 
     // Map visualization
-    declare_parameter<double>("map_voxel_size", 0.2);
-    declare_parameter<int>("local_map_scans", 20);       // recent scans in the local map window
-    declare_parameter<double>("publish_voxel_size", 0.1); // per-scan voxel for the local window
+    declare_parameter<double>("map_voxel_size", 0.2);     // full_map_ grid resolution (save service)
+    declare_parameter<double>("publish_voxel_size", 0.3); // viz_map_ grid resolution (~/cloud_world)
     declare_parameter<double>("publish_radius", 80.0);    // crop radius around current pose
     declare_parameter<double>("publish_rate_hz", 5.0);    // ~/cloud_world publish rate
 }
@@ -99,10 +98,12 @@ bool LioNode::InitLIO() {
     publish_path_  = get_parameter("publish_path").as_bool();
     publish_cloud_ = get_parameter("publish_cloud").as_bool();
     map_voxel_size_ = get_parameter("map_voxel_size").as_double();
-    local_map_max_scans_ = get_parameter("local_map_scans").as_int();
     publish_voxel_size_ = get_parameter("publish_voxel_size").as_double();
     publish_radius_ = get_parameter("publish_radius").as_double();
     publish_rate_hz_ = get_parameter("publish_rate_hz").as_double();
+
+    full_map_ = std::make_unique<Bonxai::VoxelGrid<float>>(map_voxel_size_);
+    viz_map_  = std::make_unique<Bonxai::VoxelGrid<float>>(publish_voxel_size_);
 
 
     if (config_file_.empty()) {
@@ -490,7 +491,7 @@ void LioNode::PublishTF(const rclcpp::Time& stamp, const IncLIO::SE3& pose) {
 // ui_callback  (runs on timer_group_ — doesn't interfere with IMU or LiDAR callbacks)
 // ─────────────────────────────────────────────────────────────────────────────
 void LioNode::ui_callback() {
-    // 1) Drain pending scans from the lidar thread.
+    //  Drain pending scans from the lidar thread.
     std::deque<ScanEntry> pending;
     {
         std::lock_guard<std::mutex> lock(scan_queue_mutex_);
@@ -499,49 +500,20 @@ void LioNode::ui_callback() {
 
     bool updated = false;
     if (!pending.empty()) {
-        const double inv_full = 1.0 / map_voxel_size_;
-        const double inv_pub  = 1.0 / publish_voxel_size_;
+        std::lock_guard<std::mutex> lock(map_mutex_);
+        auto full_acc = full_map_->createAccessor();
+        auto viz_acc  = viz_map_->createAccessor();
 
         for (const auto& entry : pending) {
             IncLIO::CloudPtr scan_world(new IncLIO::PointCloudType());
             IncLIO::transformCloudOMP(*entry.cloud, *scan_world,
                                       entry.pose.matrix().cast<float>());
 
-            // Accumulate into full_map_ — used only by the save service.
-            {
-                std::lock_guard<std::mutex> lock(map_mutex_);
-                for (const auto& pt : scan_world->points) {
-                    IncLIO::Vec3i key(
-                        static_cast<int>(std::floor(pt.x * inv_full)),
-                        static_cast<int>(std::floor(pt.y * inv_full)),
-                        static_cast<int>(std::floor(pt.z * inv_full)));
-                    full_map_.insert_or_assign(key, pt);
-                }
-            }
-
-            // Per-scan voxelization before storing in the viz window: keeps
-            // the published payload bounded even with a large scan history.
-            std::unordered_map<IncLIO::Vec3i, IncLIO::PointType,
-                               IncLIO::hash_vec<3>> voxels;
-            voxels.reserve(scan_world->points.size() / 4 + 16);
             for (const auto& pt : scan_world->points) {
-                IncLIO::Vec3i key(
-                    static_cast<int>(std::floor(pt.x * inv_pub)),
-                    static_cast<int>(std::floor(pt.y * inv_pub)),
-                    static_cast<int>(std::floor(pt.z * inv_pub)));
-                voxels.emplace(key, pt);
+                const Bonxai::Point3D p{pt.x, pt.y, pt.z};
+                full_acc.setValue(full_map_->posToCoord(p), pt.intensity);
+                viz_acc.setValue (viz_map_->posToCoord(p),  pt.intensity);
             }
-
-            IncLIO::CloudPtr scan_voxelized(new IncLIO::PointCloudType());
-            scan_voxelized->points.reserve(voxels.size());
-            for (const auto& kv : voxels) scan_voxelized->points.push_back(kv.second);
-            scan_voxelized->width  = scan_voxelized->points.size();
-            scan_voxelized->height = 1;
-            scan_voxelized->is_dense = true;
-
-            local_scan_window_.push_back(scan_voxelized);
-            if (static_cast<int>(local_scan_window_.size()) > local_map_max_scans_)
-                local_scan_window_.pop_front();
 
             current_pose_ = entry.pose;
             updated = true;
@@ -550,7 +522,7 @@ void LioNode::ui_callback() {
 
     if (!updated) return;
 
-    // 2) Publish local map: crop the window around the current pose.
+    // Publish: iterate viz_map_ active cells, keep those within radius.
     const auto& c = current_pose_.translation();
     const float cx = static_cast<float>(c.x());
     const float cy = static_cast<float>(c.y());
@@ -558,19 +530,39 @@ void LioNode::ui_callback() {
     const float r2 = static_cast<float>(publish_radius_ * publish_radius_);
 
     IncLIO::CloudPtr local_map(new IncLIO::PointCloudType());
-    size_t total_pts = 0;
-    for (const auto& sc : local_scan_window_) total_pts += sc->points.size();
-    local_map->points.reserve(total_pts);
+    std::vector<Bonxai::CoordT> to_off;
+    {
+        std::lock_guard<std::mutex> lock(map_mutex_);
+        local_map->points.reserve(viz_map_->activeCellsCount());
 
-    for (const auto& sc : local_scan_window_) {
-        for (const auto& pt : sc->points) {
-            const float dx = pt.x - cx;
-            const float dy = pt.y - cy;
-            const float dz = pt.z - cz;
-            if (dx*dx + dy*dy + dz*dz <= r2)
-                local_map->points.push_back(pt);
+        // Single pass: emit the point if inside the radius, otherwise queue
+        // the cell for pruning. Keeps viz_map_ footprint bounded to the ball
+        // around the current pose.
+        viz_map_->forEachCell([&](const float& intensity, const Bonxai::CoordT& coord) {
+            const Bonxai::Point3D p = viz_map_->coordToPos(coord);
+            const float dx = static_cast<float>(p.x) - cx;
+            const float dy = static_cast<float>(p.y) - cy;
+            const float dz = static_cast<float>(p.z) - cz;
+            if (dx*dx + dy*dy + dz*dz > r2) {
+                to_off.push_back(coord);
+                return;
+            }
+
+            IncLIO::PointType out;
+            out.x = static_cast<float>(p.x);
+            out.y = static_cast<float>(p.y);
+            out.z = static_cast<float>(p.z);
+            out.intensity = intensity;
+            local_map->points.push_back(out);
+        });
+
+        if (!to_off.empty()) {
+            auto acc = viz_map_->createAccessor();
+            for (const auto& c : to_off) acc.setCellOff(c);
+            viz_map_->releaseUnusedMemory();
         }
     }
+
     local_map->width    = local_map->points.size();
     local_map->height   = 1;
     local_map->is_dense = true;
@@ -592,9 +584,16 @@ void LioNode::SaveMapCallback(
     IncLIO::CloudPtr map(new IncLIO::PointCloudType());
     {
         std::lock_guard<std::mutex> lock(map_mutex_);
-        map->points.reserve(full_map_.size());
-        for (const auto& [key, pt] : full_map_)
-            map->points.push_back(pt);
+        map->points.reserve(full_map_->activeCellsCount());
+        full_map_->forEachCell([&](const float& intensity, const Bonxai::CoordT& coord) {
+            const Bonxai::Point3D p = full_map_->coordToPos(coord);
+            IncLIO::PointType out;
+            out.x = static_cast<float>(p.x);
+            out.y = static_cast<float>(p.y);
+            out.z = static_cast<float>(p.z);
+            out.intensity = intensity;
+            map->points.push_back(out);
+        });
     }
     map->width = map->points.size();
     map->height = 1;
