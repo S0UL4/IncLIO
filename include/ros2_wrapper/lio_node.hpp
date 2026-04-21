@@ -41,6 +41,8 @@
 
 #include "inclio/inclio.hpp"
 
+#include "bonxai/bonxai.hpp"
+
 #include <rclcpp/rclcpp.hpp>
 #include <tf2_ros/transform_broadcaster.h>
 
@@ -144,9 +146,7 @@ private:
     bool publish_path_  = true;
     bool publish_cloud_ = true;
 
-    // ── Voxelized full map ───────────────────────────────────────────────────
-    // One point per voxel cell — clean, uniform-density, grows over time.
-    // Transform + insert happens on the timer thread, not the lidar callback.
+    // ── Transformed-scan queue (lidar thread → timer thread) ────────────────
     struct ScanEntry {
         IncLIO::CloudPtr cloud;
         IncLIO::SE3 pose;
@@ -154,23 +154,20 @@ private:
     std::deque<ScanEntry> scan_queue_;
     std::mutex scan_queue_mutex_;
 
-    using VoxelMap = std::unordered_map<IncLIO::Vec3i, IncLIO::PointType,
-                                        IncLIO::hash_vec<3>>;
-    VoxelMap full_map_;
+    // ── Bonxai voxel grids ──────────────────────────────────────────────────
+    // full_map_  : persistent world grid at map_voxel_size_ — consumed by the
+    //              save service (no pruning, grows with explored space).
+    // viz_map_   : persistent world grid at publish_voxel_size_ — published on
+    //              ~/cloud_world, cropped to publish_radius_ around current pose.
+    // Each cell stores one intensity value; position comes from coordToPos().
+    std::unique_ptr<Bonxai::VoxelGrid<float>> full_map_;
+    std::unique_ptr<Bonxai::VoxelGrid<float>> viz_map_;
     std::mutex map_mutex_;
-    double map_voxel_size_ = 0.2;
 
-    // Sliding window of recent world-frame scans for local map visualization.
-    // Scans are pre-voxelized at publish_voxel_size_ before insertion so the
-    // window can hold more history without exploding the publish payload.
-    // Only accessed from ui_callback (timer_group_, MutuallyExclusive) — no mutex needed.
-    std::deque<IncLIO::CloudPtr> local_scan_window_;
-    int local_map_max_scans_ = 20;
-
-    // Visualization publish config — decoupled from LIO update rate.
-    double publish_voxel_size_ = 0.3;   // per-scan voxel size for the local window
-    double publish_radius_     = 80.0;  // crop around current pose at publish
-    double publish_rate_hz_    = 5.0;   // ~/cloud_world publish rate
+    double map_voxel_size_     = 0.2;
+    double publish_voxel_size_ = 0.3;
+    double publish_radius_     = 80.0;
+    double publish_rate_hz_    = 5.0;
 
     // Latest corrected pose from the lidar thread — used as the crop center.
     IncLIO::SE3 current_pose_;

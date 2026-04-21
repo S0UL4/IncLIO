@@ -27,7 +27,7 @@ find_package(std_srvs REQUIRED)
 find_package(pcl_conversions REQUIRED)
 
 # Optional Livox support
-find_package(livox_ros_driver2 QUIET)
+find_package(livox_ros_driver2 REQUIRED)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # IncLIO core — built directly from source inside this package.
@@ -40,6 +40,17 @@ set(BUILD_TESTS OFF CACHE BOOL "" FORCE)
 
 
 add_subdirectory(IncLIO)   # → defines targets: inclio_common, inclio
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Bonxai (sparse voxel grid) — header-only, pulled in as a git submodule.
+# Used for the persistent world map + viz crop.
+# ─────────────────────────────────────────────────────────────────────────────
+if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/Bonxai/bonxai_core/CMakeLists.txt")
+  message(FATAL_ERROR
+    "Bonxai submodule is missing. Run:\n"
+    "  git submodule update --init --recursive")
+endif()
+add_subdirectory(3rdparty/Bonxai/bonxai_core EXCLUDE_FROM_ALL)
 # ─────────────────────────────────────────────────────────────────────────────
 # ROS2 wrapper — composable node
 # ─────────────────────────────────────────────────────────────────────────────
@@ -58,6 +69,7 @@ target_include_directories(inclio_ros2_component PUBLIC
 target_link_libraries(inclio_ros2_component
     inclio
     inclio_common
+    bonxai_core
 )
 
 ament_target_dependencies(inclio_ros2_component

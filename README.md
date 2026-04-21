@@ -40,7 +40,9 @@ A real-time LiDAR-Inertial Odometry system built on an **Iterated Error-State Ka
 ```bash
 mkdir -p ~/ros2_ws/src
 cd ~/ros2_ws/src
-git clone <repo> inclio_ros2
+git clone --recurse-submodules <repo> inclio_ros2
+# (if cloned without --recurse-submodules)
+# cd inclio_ros2 && git submodule update --init --recursive
 
 cd ~/ros2_ws
 colcon build --symlink-install
