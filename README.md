@@ -2,6 +2,10 @@
 
 A real-time LiDAR-Inertial Odometry system built on an **Iterated Error-State Kalman Filter (IESKF)** with **Normal Distribution Transform (NDT)** scan-to-map registration. Designed for high-rate, low-latency pose estimation on robotic platforms.
 
+<p align="center">
+  <img src="doc/demo.gif" alt="IncLIO demo" width="800"/>
+</p>
+
 ## Features
 
 ### Core Odometry
@@ -26,8 +30,9 @@ A real-time LiDAR-Inertial Odometry system built on an **Iterated Error-State Ka
 - **Multi-threaded executor** (3 threads) with separate callback groups for IMU, LiDAR, and map visualization
 - **IMU-rate TF broadcast** for smooth transforms in RViz2 and downstream nodes
 - **Dual odometry topics**: corrected (`~/odometry` at scan rate) and propagated (`~/odometry_fast` at IMU rate)
-- **Voxelized full map** — spatial-hash deduplication for clean, uniform-density point cloud visualization
-- **Map save service** (`~/save_map`) — saves the full map to PCD via `std_srvs/Trigger`
+- **Local map visualization** — bounded sliding window of recent scans published on `~/cloud_world` (configurable scan count), constant publish cost regardless of total distance travelled
+- **Full map accumulation** — voxelized global map kept in memory for accurate save; never published over the wire
+- **Map save service** (`~/save_map`) — saves the full voxelized map to PCD via `std_srvs/Trigger`
 - **Multi-LiDAR support**: Hesai Pandar, Velodyne, Ouster, Livox Mid-360 (native `CustomMsg`)
 
 ## Build
@@ -84,7 +89,7 @@ ros2 service call /inclio_ros2_node/save_map std_srvs/srv/Trigger
 | `~/odometry` | `nav_msgs/Odometry` | Scan rate (~10-20 Hz) | NDT-corrected pose |
 | `~/odometry_fast` | `nav_msgs/Odometry` | IMU rate (~100-200 Hz) | IMU-propagated pose |
 | `~/path` | `nav_msgs/Path` | Scan rate | Trajectory history |
-| `~/cloud_world` | `sensor_msgs/PointCloud2` | Timer (configurable) | Voxelized map in world frame |
+| `~/cloud_world` | `sensor_msgs/PointCloud2` | Timer (100 Hz) | Local map (last N scans) in world frame |
 
 ### Services
 
@@ -109,7 +114,8 @@ Broadcasts `world -> body` at IMU rate.
 | `point_filter_num` | `1` | Keep every N-th point |
 | `world_frame` | `"world"` | TF parent frame |
 | `body_frame` | `"body"` | TF child frame (IMU) |
-| `map_voxel_size` | `0.2` | Visualization map voxel size (meters) |
+| `map_voxel_size` | `0.2` | Voxel size for full map accumulation (meters) |
+| `local_map_scans` | `20` | Number of recent scans to publish as local map |
 | `publish_tf` | `true` | Broadcast TF |
 | `publish_path` | `true` | Publish trajectory |
 | `publish_cloud` | `true` | Publish point cloud map |
@@ -134,26 +140,11 @@ imu_init_time: 10.0      # static initialization duration (seconds)
 max_static_gyro_var: 0.5 # gyro variance threshold for static detection
 max_static_acce_var: 0.2 # accel variance threshold for static detection
 ```
+<!-- ## Architecture
 
-## Architecture
-
-```
-IMU (100-200 Hz) -> ImuCallback -> AddIMU -> Forward Propagation -> ~/odometry_fast + TF
-                                          \                                ^
-LiDAR (10-20 Hz) -> CloudCallback ---------> MessageSync                   |
-                                                |                          |
-                                       ProcessMeasurements                 |
-                                                |                          |
-                                     Predict (IESKF + IMU)                 |
-                                                |                          |
-                                     Undistort (motion compensation)       |
-                                                |                          |
-                                     Align (NDT + IESKF update) ----------+
-                                                |                 anchors propagated state
-                                   ~/odometry + ~/path + scan queue
-                                                              |
-                              Timer thread: transform + voxel insert -> ~/cloud_world
-```
+<p align="center">
+  <img src="doc/architecture.png" alt="IncLIO architecture diagram" width="700"/>
+</p> -->
 
 ## Dependencies
 
