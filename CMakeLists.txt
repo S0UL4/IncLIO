@@ -38,6 +38,7 @@ find_package(livox_ros_driver2 REQUIRED)
 set(BUILD_TOOLS OFF CACHE BOOL "" FORCE)
 set(BUILD_TESTS OFF CACHE BOOL "" FORCE)
 
+option(BUILD_BENCHMARKS "Build NDT / transform benchmarks" OFF)
 
 add_subdirectory(IncLIO)   # → defines targets: inclio_common, inclio
 
@@ -116,6 +117,10 @@ install(TARGETS inclio_ros2_node
 install(DIRECTORY include/ DESTINATION include)
 install(DIRECTORY launch/  DESTINATION share/${PROJECT_NAME}/launch)
 install(DIRECTORY config/  DESTINATION share/${PROJECT_NAME}/config)
+
+if(BUILD_BENCHMARKS)
+  add_subdirectory(test)
+endif()
 
 ament_package()
 

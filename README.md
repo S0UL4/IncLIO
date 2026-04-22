@@ -19,21 +19,47 @@ A real-time LiDAR-Inertial Odometry system built on an **Iterated Error-State Ka
 - **LRU eviction** for bounded memory in real-time operation
 - **Incremental map update** — new scans are inserted only when sufficient motion is detected
 
+### Map Storage & Visualization (Bonxai)
+- **Two independent `Bonxai::VoxelGrid<float>` grids** backed by a hierarchical block structure with O(1) random access
+- **`full_map_`** — fine-resolution persistent grid (`map_voxel_size`, default 0.2 m) that accumulates every scan in world frame; consumed exclusively by the save service, never published
+- **`viz_map_`** — coarser grid (`publish_voxel_size`, default 0.3 m) cropped to a configurable radius around the current pose; published as `~/cloud_world` at a configurable rate (default 5 Hz) with constant cost regardless of total distance travelled
+- Dead cells outside the publish radius are evicted and memory is released each publish cycle, keeping the viz grid footprint bounded
+
 ### Performance
 - **Parallel voxel downsampling** using TBB concurrent hash maps
 - **OMP-parallelized** point cloud operations (undistortion, filtering, transform)
 - **Zero-cost logging** in Release builds (compile-time spdlog level gating)
-- **Offloaded map building** — scan transform and voxel insertion run on a dedicated timer thread, keeping the LiDAR callback free for odometry
+- **Offloaded map building** — scan transform and Bonxai insertion run on a dedicated timer thread, keeping the LiDAR callback latency-free
 
 ### ROS2 Wrapper
 - **Composable node** (`inclio_ros2::LioNode`) compatible with component containers
 - **Multi-threaded executor** (3 threads) with separate callback groups for IMU, LiDAR, and map visualization
 - **IMU-rate TF broadcast** for smooth transforms in RViz2 and downstream nodes
 - **Dual odometry topics**: corrected (`~/odometry` at scan rate) and propagated (`~/odometry_fast` at IMU rate)
-- **Local map visualization** — bounded sliding window of recent scans published on `~/cloud_world` (configurable scan count), constant publish cost regardless of total distance travelled
-- **Full map accumulation** — voxelized global map kept in memory for accurate save; never published over the wire
+- **Real-time map visualization** — `viz_map_` Bonxai grid published on `~/cloud_world` at configurable rate, radius-cropped around current pose for constant publish cost
+- **Full map accumulation** — `full_map_` Bonxai grid at high resolution, kept in memory for accurate save; never published over the wire
 - **Map save service** (`~/save_map`) — saves the full voxelized map to PCD via `std_srvs/Trigger`
 - **Multi-LiDAR support**: Hesai Pandar, Velodyne, Ouster, Livox Mid-360 (native `CustomMsg`)
+
+## Benchmarks
+
+Custom NDT and transform implementations benchmarked against their PCL equivalents on random 3-D point clouds with a 1 m voxel size and 4 Gauss-Newton iterations.
+
+<p align="center">
+  <img src="test/benchmark_time_comparison.png" alt="IncLIO vs PCL timing benchmark" width="900"/>
+</p>
+
+| Benchmark | IncLIO | PCL | Speedup |
+|-----------|--------|-----|---------|
+| `transformCloudOMP` (100k pts) | 0.07 ms | 0.15 ms | **~2×** |
+| `NdtMap::AddCloud` (100k pts) | 7.85 ms | 1911 ms | **~243×** |
+| `AlignNdt` (30k pts, pre-built map) | 3.03 ms | 107 ms | **~35×** |
+| Full pipeline (30k pts) | 5.62 ms | 111 ms | **~20×** |
+
+Key observations:
+- **Transform**: `transformCloudOMP` has OMP thread-spawn overhead at very small clouds (< 5k pts) and is 1.6–3× faster above that threshold.
+- **Map build**: `NdtMap::AddCloud` uses a spatial hash + `std::execution::par_unseq` to update voxel distributions; PCL's `VoxelGridCovariance` is single-threaded and allocates heavily.
+- **Alignment**: advantage shrinks at 100k pts because the 700k NEARBY6 residuals (100k × 7 neighbors) saturate the TBB work-stealing scheduler; PCL's kdtree lookup remains cache-friendly at that density.
 
 ## Build
 
@@ -81,8 +107,8 @@ ros2 service call /inclio_ros2_node/save_map std_srvs/srv/Trigger
 | Topic | Type | Description |
 |-------|------|-------------|
 | `~/imu` | `sensor_msgs/Imu` | IMU measurements |
-| `~/points` | `sensor_msgs/PointCloud2` | LiDAR point cloud |
-| `~/points_livox` | `livox_ros_driver2/CustomMsg` | Livox native (if compiled) |
+| `~/points` | `sensor_msgs/PointCloud2` or `livox_ros_driver2/CustomMsg` | LiDAR point cloud |
+
 
 ### Publications
 
@@ -91,7 +117,7 @@ ros2 service call /inclio_ros2_node/save_map std_srvs/srv/Trigger
 | `~/odometry` | `nav_msgs/Odometry` | Scan rate (~10-20 Hz) | NDT-corrected pose |
 | `~/odometry_fast` | `nav_msgs/Odometry` | IMU rate (~100-200 Hz) | IMU-propagated pose |
 | `~/path` | `nav_msgs/Path` | Scan rate | Trajectory history |
-| `~/cloud_world` | `sensor_msgs/PointCloud2` | Timer (100 Hz) | Local map (last N scans) in world frame |
+| `~/cloud_world` | `sensor_msgs/PointCloud2` | `publish_rate_hz` (default 5 Hz) | Radius-cropped `viz_map_` Bonxai grid in world frame |
 
 ### Services
 
@@ -116,8 +142,10 @@ Broadcasts `world -> body` at IMU rate.
 | `point_filter_num` | `1` | Keep every N-th point |
 | `world_frame` | `"world"` | TF parent frame |
 | `body_frame` | `"body"` | TF child frame (IMU) |
-| `map_voxel_size` | `0.2` | Voxel size for full map accumulation (meters) |
-| `local_map_scans` | `20` | Number of recent scans to publish as local map |
+| `map_voxel_size` | `0.2` | `full_map_` Bonxai grid resolution — used by save service (meters) |
+| `publish_voxel_size` | `0.3` | `viz_map_` Bonxai grid resolution — published on `~/cloud_world` (meters) |
+| `publish_radius` | `80.0` | Radius around current pose to include in `~/cloud_world` (meters) |
+| `publish_rate_hz` | `5.0` | Publish rate of `~/cloud_world` (Hz) |
 | `publish_tf` | `true` | Broadcast TF |
 | `publish_path` | `true` | Publish trajectory |
 | `publish_cloud` | `true` | Publish point cloud map |
@@ -153,7 +181,8 @@ max_static_acce_var: 0.2 # accel variance threshold for static detection
 - **Eigen3** — linear algebra
 - **Sophus** — SO3/SE3 Lie group operations
 - **PCL** — point cloud types, I/O
-- **TBB** — parallel voxel downsampling
-- **OpenMP** — parallel point operations
+- **TBB** — parallel voxel downsampling and NDT Gauss-Newton reduction
+- **OpenMP** — parallel point cloud operations (undistortion, transform)
+- **[Bonxai](https://github.com/facontidavide/Bonxai)** — hierarchical sparse voxel grid for `full_map_` (save service) and `viz_map_` (real-time visualization); included as a git submodule under `3rdparty/Bonxai`
 - **spdlog** — logging
 - **yaml-cpp** — configuration parsing
