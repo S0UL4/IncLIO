@@ -5,6 +5,7 @@
 #include "inclio/imu.hpp"
 #include "inclio/imu_processor.hpp"
 #include "inclio/measurement_sync.hpp"
+#include "inclio/ct_undistort.hpp"
 #include "ieskf/ieskf.hpp"
 #include "ndt/ndt_map.hpp"
 #include "ndt/ndt_registration.hpp"
@@ -84,6 +85,10 @@ struct LIOConfig {
 
     // UI
     bool with_ui = false;
+
+    // Use DLIO continuous-time motion correction in Undistort().
+    // When false, falls back to the original slerp/lerp PoseInterp.
+    bool use_ct_undistort = true;
 };
 
 class LIO {
@@ -124,6 +129,9 @@ class LIO {
 
     /// Whether IMU initialization is done
     bool IsInitialized() const { return !imu_need_init_; }
+
+    /// True if the last processed scan was added to the NDT map (keyframe condition met).
+    bool WasKeyframe() const { return last_was_keyframe_; }
 
     /// Shut down (clean up UI if active)
     void Finish();
@@ -166,9 +174,15 @@ class LIO {
     // State
     MeasureGroup measures_;
     std::vector<Stated> imu_states_;
+    // Parallel arrays populated in Predict(), consumed in Undistort() for CT model.
+    // imu_a_world_[k] = R_k*(acce_k - ba_k) + g  (world-frame, one entry per IMU sample)
+    // imu_w_body_[k]  = gyro_k - bg_k             (body-frame,  one entry per IMU sample)
+    std::vector<Vec3d> imu_a_world_;
+    std::vector<Vec3d> imu_w_body_;
     SE3 last_pose_;
     SE3 last_kf_pose_;
     bool imu_need_init_ = true;
+    bool last_was_keyframe_ = false;
     bool first_scan_ = true;
     int frame_num_ = 0;
 

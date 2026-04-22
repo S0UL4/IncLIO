@@ -123,6 +123,7 @@ class IESKF {
     }
 
     void SetR(const SO3& R) { R_ = R; }
+    void SetCurrentTime(double t) { current_time_ = t; }
 
     void SetCov(const Mat18T& cov) { cov_ = cov; }
     Vec3d GetGravity() const { return g_; }

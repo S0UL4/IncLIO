@@ -42,11 +42,23 @@ LioNode::LioNode(const rclcpp::NodeOptions& options)
     CreatePublishers();
     CreateSubscriptions();
 
+    // Start the viz worker thread outside the executor pool.
+    // It owns forEachCell + serialize + publish so ui_callback stays < 5 ms.
+    viz_worker_ = std::thread(&LioNode::VizWorkerLoop, this);
+
     RCLCPP_INFO(get_logger(), "IncLIO ROS2 node ready (multi-threaded)");
 }
 
 
 LioNode::~LioNode() {
+    // Stop the viz worker before destroying shared resources.
+    {
+        std::lock_guard<std::mutex> lk(viz_cv_mutex_);
+        viz_worker_stop_ = true;
+    }
+    viz_cv_.notify_one();
+    if (viz_worker_.joinable()) viz_worker_.join();
+
     if (lio_) {
         lio_->Finish();
     }
@@ -166,6 +178,9 @@ bool LioNode::InitLIO() {
             "No 'mapping' section in config — assuming identity extrinsics");
         lio_config.T_imu_lidar = IncLIO::SE3();
     }
+
+    if (yaml["use_ct_undistort"])
+        lio_config.use_ct_undistort = yaml["use_ct_undistort"].as<bool>();
 
     // ── Construct and initialise LIO ──────────────────────────────────────────
     lio_ = std::make_unique<IncLIO::LIO>(lio_config);
@@ -394,7 +409,7 @@ void LioNode::ProcessCloud(IncLIO::FullCloudPtr cloud, double ts,
 
     PublishOdometry(stamp, pose, state);
     if (publish_path_)  PublishPath(stamp, pose);
-    if (publish_cloud_) PublishCloud(stamp, pose);
+    if (publish_cloud_ && lio_->WasKeyframe()) PublishCloud(stamp, pose);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -488,90 +503,126 @@ void LioNode::PublishTF(const rclcpp::Time& stamp, const IncLIO::SE3& pose) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ui_callback  (runs on timer_group_ — doesn't interfere with IMU or LiDAR callbacks)
+// ui_callback  (runs on timer_group_)
 // ─────────────────────────────────────────────────────────────────────────────
+// Fast path only: drain scan_queue_, transform to world frame, insert into both
+// Bonxai grids, then signal VizWorkerLoop. Total wall time < 5 ms regardless of
+// map size. The slow forEachCell + serialize + publish is owned by the worker.
 void LioNode::ui_callback() {
-    //  Drain pending scans from the lidar thread.
     std::deque<ScanEntry> pending;
     {
         std::lock_guard<std::mutex> lock(scan_queue_mutex_);
         pending.swap(scan_queue_);
     }
+    if (pending.empty()) return;
 
-    bool updated = false;
-    if (!pending.empty()) {
-        std::lock_guard<std::mutex> lock(map_mutex_);
-        auto full_acc = full_map_->createAccessor();
-        auto viz_acc  = viz_map_->createAccessor();
-
-        for (const auto& entry : pending) {
-            IncLIO::CloudPtr scan_world(new IncLIO::PointCloudType());
-            IncLIO::transformCloudOMP(*entry.cloud, *scan_world,
-                                      entry.pose.matrix().cast<float>());
-
-            for (const auto& pt : scan_world->points) {
-                const Bonxai::Point3D p{pt.x, pt.y, pt.z};
-                full_acc.setValue(full_map_->posToCoord(p), pt.intensity);
-                viz_acc.setValue (viz_map_->posToCoord(p),  pt.intensity);
-            }
-
-            current_pose_ = entry.pose;
-            updated = true;
-        }
+    // Transform to world frame without holding any map mutex.
+    std::vector<IncLIO::CloudPtr> scans_world;
+    scans_world.reserve(pending.size());
+    for (const auto& entry : pending) {
+        auto sw = std::make_shared<IncLIO::PointCloudType>();
+        IncLIO::transformCloudOMP(*entry.cloud, *sw, entry.pose.matrix().cast<float>());
+        scans_world.push_back(std::move(sw));
+        current_pose_ = entry.pose;
     }
 
-    if (!updated) return;
-
-    // Publish: iterate viz_map_ active cells, keep those within radius.
-    const auto& c = current_pose_.translation();
-    const float cx = static_cast<float>(c.x());
-    const float cy = static_cast<float>(c.y());
-    const float cz = static_cast<float>(c.z());
-    const float r2 = static_cast<float>(publish_radius_ * publish_radius_);
-
-    IncLIO::CloudPtr local_map(new IncLIO::PointCloudType());
-    std::vector<Bonxai::CoordT> to_off;
+    // Insert into full_map_ (blocking — insert is fast, save service holds this briefly).
     {
-        std::lock_guard<std::mutex> lock(map_mutex_);
-        local_map->points.reserve(viz_map_->activeCellsCount());
-
-        // Single pass: emit the point if inside the radius, otherwise queue
-        // the cell for pruning. Keeps viz_map_ footprint bounded to the ball
-        // around the current pose.
-        viz_map_->forEachCell([&](const float& intensity, const Bonxai::CoordT& coord) {
-            const Bonxai::Point3D p = viz_map_->coordToPos(coord);
-            const float dx = static_cast<float>(p.x) - cx;
-            const float dy = static_cast<float>(p.y) - cy;
-            const float dz = static_cast<float>(p.z) - cz;
-            if (dx*dx + dy*dy + dz*dz > r2) {
-                to_off.push_back(coord);
-                return;
-            }
-
-            IncLIO::PointType out;
-            out.x = static_cast<float>(p.x);
-            out.y = static_cast<float>(p.y);
-            out.z = static_cast<float>(p.z);
-            out.intensity = intensity;
-            local_map->points.push_back(out);
-        });
-
-        if (!to_off.empty()) {
-            auto acc = viz_map_->createAccessor();
-            for (const auto& c : to_off) acc.setCellOff(c);
-            viz_map_->releaseUnusedMemory();
+        std::lock_guard<std::mutex> lock(full_map_mutex_);
+        auto acc = full_map_->createAccessor();
+        for (const auto& sw : scans_world) {
+            for (const auto& pt : sw->points)
+                acc.setValue(full_map_->posToCoord({pt.x, pt.y, pt.z}), pt.intensity);
         }
     }
 
-    local_map->width    = local_map->points.size();
-    local_map->height   = 1;
-    local_map->is_dense = true;
+    // Insert into viz_map_ — try_lock so we never block on the worker's forEachCell.
+    // If the worker holds viz_map_mutex_, these scans are skipped for this cycle
+    // (visualization-only data, one-cycle staleness is acceptable).
+    if (viz_map_mutex_.try_lock()) {
+        auto acc = viz_map_->createAccessor();
+        for (const auto& sw : scans_world) {
+            for (const auto& pt : sw->points)
+                acc.setValue(viz_map_->posToCoord({pt.x, pt.y, pt.z}), pt.intensity);
+        }
+        viz_map_mutex_.unlock();
+    }
 
-    sensor_msgs::msg::PointCloud2 msg;
-    pcl::toROSMsg(*local_map, msg);
-    msg.header.stamp    = now();
-    msg.header.frame_id = world_frame_;
-    cloud_world_pub_->publish(msg);
+    // Wake the viz worker. Pass the crop centre under the cv mutex.
+    {
+        std::lock_guard<std::mutex> lk(viz_cv_mutex_);
+        viz_work_ready_  = true;
+        viz_crop_center_ = current_pose_;
+    }
+    viz_cv_.notify_one();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// VizWorkerLoop  (dedicated std::thread, not in the executor pool)
+// ─────────────────────────────────────────────────────────────────────────────
+// Owns the slow path: forEachCell over viz_map_, pcl::toROSMsg, publish.
+// Woken by ui_callback via viz_cv_. If it's still running when the next signal
+// arrives, that signal is coalesced (viz_work_ready_ stays true) and the next
+// wakeup picks it up — no publish cycle is permanently lost, just merged.
+void LioNode::VizWorkerLoop() {
+    while (true) {
+        IncLIO::SE3 crop_center;
+        {
+            std::unique_lock<std::mutex> lk(viz_cv_mutex_);
+            viz_cv_.wait(lk, [this] { return viz_work_ready_ || viz_worker_stop_; });
+            if (viz_worker_stop_) break;
+            viz_work_ready_ = false;
+            crop_center = viz_crop_center_;
+        }
+
+        if (!publish_cloud_ || !cloud_world_pub_) continue;
+
+        const auto& t = crop_center.translation();
+        const float cx = static_cast<float>(t.x());
+        const float cy = static_cast<float>(t.y());
+        const float cz = static_cast<float>(t.z());
+        const float r2 = static_cast<float>(publish_radius_ * publish_radius_);
+
+        IncLIO::CloudPtr local_map(new IncLIO::PointCloudType());
+        std::vector<Bonxai::CoordT> to_off;
+        {
+            std::lock_guard<std::mutex> lock(viz_map_mutex_);
+            local_map->points.reserve(viz_map_->activeCellsCount());
+
+            viz_map_->forEachCell([&](const float& intensity, const Bonxai::CoordT& coord) {
+                const Bonxai::Point3D p = viz_map_->coordToPos(coord);
+                const float dx = static_cast<float>(p.x) - cx;
+                const float dy = static_cast<float>(p.y) - cy;
+                const float dz = static_cast<float>(p.z) - cz;
+                if (dx*dx + dy*dy + dz*dz > r2) {
+                    to_off.push_back(coord);
+                    return;
+                }
+                IncLIO::PointType out;
+                out.x = static_cast<float>(p.x);
+                out.y = static_cast<float>(p.y);
+                out.z = static_cast<float>(p.z);
+                out.intensity = intensity;
+                local_map->points.push_back(out);
+            });
+
+            if (!to_off.empty()) {
+                auto acc = viz_map_->createAccessor();
+                for (const auto& coord : to_off) acc.setCellOff(coord);
+                viz_map_->releaseUnusedMemory();
+            }
+        } // release viz_map_mutex_ — ui_callback can now insert new scans
+
+        local_map->width    = local_map->points.size();
+        local_map->height   = 1;
+        local_map->is_dense = true;
+
+        sensor_msgs::msg::PointCloud2 msg;
+        pcl::toROSMsg(*local_map, msg);
+        msg.header.stamp    = now();
+        msg.header.frame_id = world_frame_;
+        cloud_world_pub_->publish(msg);
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -583,7 +634,7 @@ void LioNode::SaveMapCallback(
 {
     IncLIO::CloudPtr map(new IncLIO::PointCloudType());
     {
-        std::lock_guard<std::mutex> lock(map_mutex_);
+        std::lock_guard<std::mutex> lock(full_map_mutex_);
         map->points.reserve(full_map_->activeCellsCount());
         full_map_->forEachCell([&](const float& intensity, const Bonxai::CoordT& coord) {
             const Bonxai::Point3D p = full_map_->coordToPos(coord);
