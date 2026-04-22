@@ -21,3 +21,6 @@ with_ui: false
 max_static_acce_var: 0.05
 max_static_gyro_var: 0.01
 imu_init_time: 10.0
+
+# DLIO continuous-time motion correction (set false to use original slerp/lerp)
+use_ct_undistort: false

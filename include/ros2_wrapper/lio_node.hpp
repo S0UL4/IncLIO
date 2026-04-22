@@ -61,6 +61,8 @@
 #include <memory>
 #include <mutex>
 #include <deque>
+#include <thread>
+#include <condition_variable>
 #include <unordered_map>
 
 
@@ -84,6 +86,9 @@ private:
     void ImuCallback(sensor_msgs::msg::Imu::UniquePtr msg);
     void CloudCallback(sensor_msgs::msg::PointCloud2::UniquePtr msg);
     void ui_callback();
+
+    // ── Viz worker (forEachCell + serialize + publish, outside executor pool) ─
+    void VizWorkerLoop();
 
 #ifdef HAVE_LIVOX_ROS_DRIVER2
     void LivoxCallback(const livox_ros_driver2::msg::CustomMsg::SharedPtr msg);
@@ -162,7 +167,13 @@ private:
     // Each cell stores one intensity value; position comes from coordToPos().
     std::unique_ptr<Bonxai::VoxelGrid<float>> full_map_;
     std::unique_ptr<Bonxai::VoxelGrid<float>> viz_map_;
-    std::mutex map_mutex_;
+
+    // full_map_mutex_ : protects full_map_ (ui_callback insert + SaveMapCallback read).
+    // viz_map_mutex_  : protects viz_map_  (ui_callback try-insert + VizWorkerLoop
+    //                   forEachCell+prune). ui_callback uses try_lock so it never
+    //                   blocks waiting for the slow forEachCell in the worker.
+    std::mutex full_map_mutex_;
+    std::mutex viz_map_mutex_;
 
     double map_voxel_size_     = 0.2;
     double publish_voxel_size_ = 0.3;
@@ -171,6 +182,16 @@ private:
 
     // Latest corrected pose from the lidar thread — used as the crop center.
     IncLIO::SE3 current_pose_;
+
+    // ── Viz worker state ────────────────────────────────────────────────────
+    // The worker runs forEachCell + pcl::toROSMsg + publish independently of
+    // the executor thread pool so that ui_callback always returns in < 5 ms.
+    std::thread             viz_worker_;
+    std::mutex              viz_cv_mutex_;
+    std::condition_variable viz_cv_;
+    bool                    viz_work_ready_  = false;
+    bool                    viz_worker_stop_ = false;
+    IncLIO::SE3             viz_crop_center_;  // crop centre passed to the worker
 
     // CloudConvertConfig 
     CloudConvertConfig cc;

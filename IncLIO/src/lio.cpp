@@ -167,6 +167,10 @@ void LIO::TryInitIMU() {
                                     world_gravity);
         ieskf_.SetR(init_R);
 
+        // Seed current_time_ so the first Predict() dt is ~imu_dt_, not ~1.775e9 s.
+        if (!measures_.imu_.empty())
+            ieskf_.SetCurrentTime(measures_.imu_.back()->timestamp_);
+
         imu_need_init_ = false;
         INCLIO_INFO("IMU initialization successful, init_R ypr: [{:.2f}, {:.2f}, {:.2f}] deg",
                     init_R.log()[2] * 180.0 / M_PI,
@@ -177,9 +181,15 @@ void LIO::TryInitIMU() {
 
 void LIO::Predict() {
     imu_states_.clear();
+    imu_a_world_.clear();
+    imu_w_body_.clear();
     imu_states_.emplace_back(ieskf_.GetNominalState());
 
+    const Vec3d g = ieskf_.GetGravity();
     for (const auto& imu : measures_.imu_) {
+        const Stated& s = imu_states_.back();
+        imu_a_world_.push_back(s.R_ * (imu->acce_ - s.ba_) + g);
+        imu_w_body_.push_back(imu->gyro_ - s.bg_);
         ieskf_.Predict(*imu);
         imu_states_.emplace_back(ieskf_.GetNominalState());
     }
@@ -191,27 +201,36 @@ void LIO::Undistort() {
     SE3 T_end = SE3(imu_state.R_, imu_state.p_);
     const SE3& TIL = config_.T_imu_lidar;
 
-    // Transform all points to the scan-end timestamp
-    std::for_each(std::execution::par_unseq, cloud->points.begin(), cloud->points.end(), [&](auto& pt) {
-        SE3 Ti = T_end;
-        Stated match;
+    // Build CT trajectory once outside the parallel loop (read-only inside).
+    std::vector<CTSegment> ct_segs;
+    if (config_.use_ct_undistort)
+        ct_segs = BuildCTSegments(imu_states_, imu_a_world_, imu_w_body_);
 
-        // pt.time is the offset from scan begin in milliseconds
-        math::PoseInterp<Stated>(
-            measures_.lidar_begin_time_ + pt.time * 1e-3, imu_states_,
-            [](const Stated& s) { return s.timestamp_; },
-            [](const Stated& s) { return s.GetSE3(); },
-            Ti, match);
+    std::for_each(std::execution::par_unseq, cloud->points.begin(), cloud->points.end(), [&](auto& pt) {
+        const double t_pt = measures_.lidar_begin_time_ + pt.time * 1e-3;
+        SE3 Ti;
+
+        if (config_.use_ct_undistort) {
+            Ti = CTQueryPose(t_pt, ct_segs);
+        } else {
+            // Original slerp/lerp interpolation — kept as fallback
+            Stated match;
+            math::PoseInterp<Stated>(
+                t_pt, imu_states_,
+                [](const Stated& s) { return s.timestamp_; },
+                [](const Stated& s) { return s.GetSE3(); },
+                Ti, match);
+        }
 
         Vec3d pi = ToVec3d(pt);
-        Vec3d p_compensate = T_end.inverse() * Ti * TIL * pi; //TIL.inverse() *
+        Vec3d p_compensate = T_end.inverse() * Ti * TIL * pi;
 
         pt.x = p_compensate(0);
         pt.y = p_compensate(1);
         pt.z = p_compensate(2);
     });
 
-    scan_undistort_ = cloud; // will let it for now in IMU frame so no TIL.inverse() 
+    scan_undistort_ = cloud;
 }
 
 void LIO::Align() {
@@ -319,13 +338,14 @@ void LIO::Align() {
     SE3 current_pose = ieskf_.GetNominalSE3();
     SE3 delta_pose = last_pose_.inverse() * current_pose;
 
+    last_was_keyframe_ = false;
     if (delta_pose.translation().norm() > config_.map_update_dist_th ||
         delta_pose.so3().log().norm() > math::deg2rad(config_.map_update_angle_th_deg)) {
         INCLIO_DEBUG("=== delta_pose.translation().norm() {}", delta_pose.translation().norm());
-        // CloudPtr current_scan_world(new PointCloudType);
         IncLIO::transformCloudOMP(*current_scan_filtered, *current_scan_world_, current_pose.matrix().cast<float>());
         ndt_map_.AddCloud(current_scan_world_);
         last_pose_ = current_pose;
+        last_was_keyframe_ = true;
     }
 
 #ifdef BUILD_TOOLS
@@ -343,7 +363,7 @@ bool LIO::IsKeyframe(const SE3& current_pose) {
     SE3 delta = last_kf_pose_.inverse() * current_pose;
     bool is_kf = delta.translation().norm() > config_.map_update_dist_th ||
                   delta.so3().log().norm() > math::deg2rad(config_.map_update_angle_th_deg);
-    if(is_kf || frame_num_ % 10 == 0)
+    if(is_kf)
     {
         INCLIO_DEBUG("=== keyframe detected, frame_num_ {}", frame_num_);
         last_kf_pose_ = current_pose;

@@ -25,7 +25,7 @@ def generate_launch_description():
         DeclareLaunchArgument("lidar_topic",       default_value="/astra_lidar/data_filtered",
                               description="LiDAR PointCloud2 topic"),
         DeclareLaunchArgument("map_voxel_size",     default_value="0.2"),
-        DeclareLaunchArgument("publish_voxel_size",     default_value="0.1"), # voxel size for published point cloud ( increasing this will increase accuracy but also CPU usage so the system may fail to run in real-time )
+        DeclareLaunchArgument("publish_voxel_size",     default_value="0.05"), # voxel size for published point cloud ( increasing this will increase accuracy but also CPU usage so the system may fail to run in real-time )
         DeclareLaunchArgument("publish_radius",     default_value="30.0"),    # crop radius around current pose
         DeclareLaunchArgument("publish_rate_hz",     default_value="10.0"), #
         DeclareLaunchArgument("world_frame",       default_value="world"),
