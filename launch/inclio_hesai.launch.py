@@ -28,7 +28,7 @@ def generate_launch_description():
                               description="Voxel leaf size applied to full_map_ at save time (m)"),
         DeclareLaunchArgument("body_crop_radius",   default_value="1.5",
                               description="Remove points closer than this to the sensor — strips vehicle body (m)"),
-        DeclareLaunchArgument("local_map_scans",    default_value="5",
+        DeclareLaunchArgument("local_map_scans",    default_value="20",
                               description="Number of maximum recent scans in the sliding window for ~/cloud_world"), 
         DeclareLaunchArgument("publish_rate_hz",    default_value="10.0",
                               description="Publish rate of ~/cloud_world (Hz)"),
