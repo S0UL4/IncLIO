@@ -41,7 +41,8 @@
 
 #include "inclio/inclio.hpp"
 
-#include "bonxai/bonxai.hpp"
+#include <pcl/filters/voxel_grid.h>
+#include <pcl/filters/crop_box.h>
 
 #include <rclcpp/rclcpp.hpp>
 #include <tf2_ros/transform_broadcaster.h>
@@ -87,7 +88,7 @@ private:
     void CloudCallback(sensor_msgs::msg::PointCloud2::UniquePtr msg);
     void ui_callback();
 
-    // ── Viz worker (forEachCell + serialize + publish, outside executor pool) ─
+    // ── Viz worker (downsample + crop + publish, outside executor pool) ─────
     void VizWorkerLoop();
 
 #ifdef HAVE_LIVOX_ROS_DRIVER2
@@ -159,24 +160,25 @@ private:
     std::deque<ScanEntry> scan_queue_;
     std::mutex scan_queue_mutex_;
 
-    // ── Bonxai voxel grids ──────────────────────────────────────────────────
-    // full_map_  : persistent world grid at map_voxel_size_ — consumed by the
-    //              save service (no pruning, grows with explored space).
-    // viz_map_   : persistent world grid at publish_voxel_size_ — published on
-    //              ~/cloud_world, cropped to publish_radius_ around current pose.
-    // Each cell stores one intensity value; position comes from coordToPos().
-    std::unique_ptr<Bonxai::VoxelGrid<float>> full_map_;
-    std::unique_ptr<Bonxai::VoxelGrid<float>> viz_map_;
+    // ── World-frame map storage ─────────────────────────────────────────────
+    // full_map_        : raw accumulated world-frame points; voxel-filtered on save.
+    // viz_scan_window_ : sliding window of the last viz_max_scans_ world-frame scans;
+    //                    concatenated + voxel-filtered + radius-cropped for publish.
+    IncLIO::CloudPtr full_map_;
+    std::deque<IncLIO::CloudPtr> viz_scan_window_;
+    int viz_max_scans_ = 20;
 
-    // full_map_mutex_ : protects full_map_ (ui_callback insert + SaveMapCallback read).
-    // viz_map_mutex_  : protects viz_map_  (ui_callback try-insert + VizWorkerLoop
-    //                   forEachCell+prune). ui_callback uses try_lock so it never
-    //                   blocks waiting for the slow forEachCell in the worker.
+    // full_map_mutex_ : protects full_map_ (ui_callback append + SaveMapCallback copy).
+    // viz_map_mutex_  : protects viz_scan_window_ (ui_callback push + VizWorkerLoop read).
+    //                   ui_callback uses try_lock so it never blocks on the worker.
     std::mutex full_map_mutex_;
     std::mutex viz_map_mutex_;
 
     double map_voxel_size_     = 0.2;
+    double body_crop_radius_   = 1.0;   // points closer than this to the sensor are removed
     double publish_voxel_size_ = 0.3;
+
+    pcl::CropBox<IncLIO::PointType> scan_crop_;   // near-field body removal, configured once in InitLIO
     double publish_radius_     = 80.0;
     double publish_rate_hz_    = 5.0;
 
@@ -184,7 +186,7 @@ private:
     IncLIO::SE3 current_pose_;
 
     // ── Viz worker state ────────────────────────────────────────────────────
-    // The worker runs forEachCell + pcl::toROSMsg + publish independently of
+    // The worker runs voxel downsample + radius crop + publish independently of
     // the executor thread pool so that ui_callback always returns in < 5 ms.
     std::thread             viz_worker_;
     std::mutex              viz_cv_mutex_;

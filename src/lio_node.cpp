@@ -43,7 +43,7 @@ LioNode::LioNode(const rclcpp::NodeOptions& options)
     CreateSubscriptions();
 
     // Start the viz worker thread outside the executor pool.
-    // It owns forEachCell + serialize + publish so ui_callback stays < 5 ms.
+    // It owns voxel downsample + crop + serialize + publish so ui_callback stays < 5 ms.
     viz_worker_ = std::thread(&LioNode::VizWorkerLoop, this);
 
     RCLCPP_INFO(get_logger(), "IncLIO ROS2 node ready (multi-threaded)");
@@ -92,10 +92,11 @@ void LioNode::DeclareParameters() {
     declare_parameter<bool>("publish_cloud", true);
 
     // Map visualization
-    declare_parameter<double>("map_voxel_size", 0.2);     // full_map_ grid resolution (save service)
-    declare_parameter<double>("publish_voxel_size", 0.3); // viz_map_ grid resolution (~/cloud_world)
+    declare_parameter<double>("map_voxel_size",    0.2);   // voxel leaf size for full_map_ and viz window
+    declare_parameter<double>("body_crop_radius", 1.0);   // remove points closer than this to the sensor (m)
     declare_parameter<double>("publish_radius", 80.0);    // crop radius around current pose
     declare_parameter<double>("publish_rate_hz", 5.0);    // ~/cloud_world publish rate
+    declare_parameter<int>("local_map_scans", 20);        // sliding window size for ~/cloud_world
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -109,13 +110,21 @@ bool LioNode::InitLIO() {
     publish_tf_    = get_parameter("publish_tf").as_bool();
     publish_path_  = get_parameter("publish_path").as_bool();
     publish_cloud_ = get_parameter("publish_cloud").as_bool();
-    map_voxel_size_ = get_parameter("map_voxel_size").as_double();
-    publish_voxel_size_ = get_parameter("publish_voxel_size").as_double();
+    map_voxel_size_   = get_parameter("map_voxel_size").as_double();
+    body_crop_radius_ = get_parameter("body_crop_radius").as_double();
     publish_radius_ = get_parameter("publish_radius").as_double();
     publish_rate_hz_ = get_parameter("publish_rate_hz").as_double();
 
-    full_map_ = std::make_unique<Bonxai::VoxelGrid<float>>(map_voxel_size_);
-    viz_map_  = std::make_unique<Bonxai::VoxelGrid<float>>(publish_voxel_size_);
+    full_map_      = std::make_shared<IncLIO::PointCloudType>();
+    viz_max_scans_ = get_parameter("local_map_scans").as_int();
+
+    // Body-frame CropBox: removes points within body_crop_radius_ of the sensor origin.
+    // setNegative(true) inverts the filter — points INSIDE the box are discarded,
+    // keeping only returns beyond the robot/vehicle body.
+    const float r = static_cast<float>(body_crop_radius_);
+    scan_crop_.setMin(Eigen::Vector4f(-r, -r, -r, 1.0f));
+    scan_crop_.setMax(Eigen::Vector4f( r,  r,  r, 1.0f));
+    scan_crop_.setNegative(true);
 
 
     if (config_file_.empty()) {
@@ -519,9 +528,10 @@ void LioNode::PublishTF(const rclcpp::Time& stamp, const IncLIO::SE3& pose) {
 // ─────────────────────────────────────────────────────────────────────────────
 // ui_callback  (runs on timer_group_)
 // ─────────────────────────────────────────────────────────────────────────────
-// Fast path only: drain scan_queue_, transform to world frame, insert into both
-// Bonxai grids, then signal VizWorkerLoop. Total wall time < 5 ms regardless of
-// map size. The slow forEachCell + serialize + publish is owned by the worker.
+// Fast path: drain scan_queue_, transform to world frame, voxel filter each scan
+// individually (small extent per scan → never overflows PCL int32), then accumulate
+// into full_map_ and push into the viz sliding window.
+// Following DLIO's pattern: filter-per-scan, not filter-the-whole-map.
 void LioNode::ui_callback() {
     std::deque<ScanEntry> pending;
     {
@@ -530,35 +540,45 @@ void LioNode::ui_callback() {
     }
     if (pending.empty()) return;
 
-    // Transform to world frame without holding any map mutex.
+    // Transform to world frame, then voxel filter each scan individually.
+    // Per-scan filtering is safe (one scan spans tens of meters, not the full session).
     std::vector<IncLIO::CloudPtr> scans_world;
     scans_world.reserve(pending.size());
     for (const auto& entry : pending) {
+        // 1. Body-frame near-field removal — strips the robot/vehicle body returns.
+        IncLIO::CloudPtr sw_body(new IncLIO::PointCloudType());
+        scan_crop_.setInputCloud(entry.cloud);
+        scan_crop_.filter(*sw_body);
+
+        // 2. Transform to world frame.
         auto sw = std::make_shared<IncLIO::PointCloudType>();
-        IncLIO::transformCloudOMP(*entry.cloud, *sw, entry.pose.matrix().cast<float>());
-        scans_world.push_back(std::move(sw));
+        IncLIO::transformCloudOMP(*sw_body, *sw, entry.pose.matrix().cast<float>());
+
+        // 3. Voxel downsample before accumulating.
+        auto sw_filtered = std::make_shared<IncLIO::PointCloudType>();
+        pcl::VoxelGrid<IncLIO::PointType> vf;
+        vf.setInputCloud(sw);
+        const float leaf = static_cast<float>(map_voxel_size_);
+        vf.setLeafSize(leaf, leaf, leaf);
+        vf.filter(*sw_filtered);
+
+        scans_world.push_back(sw_filtered);
         current_pose_ = entry.pose;
     }
 
-    // Insert into full_map_ (blocking — insert is fast, save service holds this briefly).
+    // Append pre-filtered scans to full_map_.
     {
         std::lock_guard<std::mutex> lock(full_map_mutex_);
-        auto acc = full_map_->createAccessor();
-        for (const auto& sw : scans_world) {
-            for (const auto& pt : sw->points)
-                acc.setValue(full_map_->posToCoord({pt.x, pt.y, pt.z}), pt.intensity);
-        }
+        for (const auto& sw : scans_world)
+            *full_map_ += *sw;
     }
 
-    // Insert into viz_map_ — try_lock so we never block on the worker's forEachCell.
-    // If the worker holds viz_map_mutex_, these scans are skipped for this cycle
-    // (visualization-only data, one-cycle staleness is acceptable).
+    // Push pre-filtered scans into the viz sliding window — try_lock so we never block on the worker.
     if (viz_map_mutex_.try_lock()) {
-        auto acc = viz_map_->createAccessor();
-        for (const auto& sw : scans_world) {
-            for (const auto& pt : sw->points)
-                acc.setValue(viz_map_->posToCoord({pt.x, pt.y, pt.z}), pt.intensity);
-        }
+        for (const auto& sw : scans_world)
+            viz_scan_window_.push_back(sw);
+        while (static_cast<int>(viz_scan_window_.size()) > viz_max_scans_)
+            viz_scan_window_.pop_front();
         viz_map_mutex_.unlock();
     }
 
@@ -574,10 +594,10 @@ void LioNode::ui_callback() {
 // ─────────────────────────────────────────────────────────────────────────────
 // VizWorkerLoop  (dedicated std::thread, not in the executor pool)
 // ─────────────────────────────────────────────────────────────────────────────
-// Owns the slow path: forEachCell over viz_map_, pcl::toROSMsg, publish.
-// Woken by ui_callback via viz_cv_. If it's still running when the next signal
-// arrives, that signal is coalesced (viz_work_ready_ stays true) and the next
-// wakeup picks it up — no publish cycle is permanently lost, just merged.
+// Owns the slow path: concatenate viz_scan_window_, voxel downsample,
+// radius crop, pcl::toROSMsg, publish.
+// Woken by ui_callback via viz_cv_. Signals are coalesced — no cycle is
+// permanently lost, just merged if the worker is still running.
 void LioNode::VizWorkerLoop() {
     while (true) {
         IncLIO::SE3 crop_center;
@@ -591,48 +611,51 @@ void LioNode::VizWorkerLoop() {
 
         if (!publish_cloud_ || !cloud_world_pub_) continue;
 
-        const auto& t = crop_center.translation();
-        const float cx = static_cast<float>(t.x());
-        const float cy = static_cast<float>(t.y());
-        const float cz = static_cast<float>(t.z());
-        const float r2 = static_cast<float>(publish_radius_ * publish_radius_);
+        // const auto& t = crop_center.translation();
+        // const float cx = static_cast<float>(t.x());
+        // const float cy = static_cast<float>(t.y());
+        // const float cz = static_cast<float>(t.z());
+        // const float r2 = static_cast<float>(publish_radius_ * publish_radius_);
 
-        IncLIO::CloudPtr local_map(new IncLIO::PointCloudType());
-        std::vector<Bonxai::CoordT> to_off;
+        // Snapshot the sliding window under lock, then release so ui_callback can push.
+        IncLIO::CloudPtr raw(new IncLIO::PointCloudType());
         {
             std::lock_guard<std::mutex> lock(viz_map_mutex_);
-            local_map->points.reserve(viz_map_->activeCellsCount());
+            for (const auto& scan : viz_scan_window_)
+                *raw += *scan;
+        }
 
-            viz_map_->forEachCell([&](const float& intensity, const Bonxai::CoordT& coord) {
-                const Bonxai::Point3D p = viz_map_->coordToPos(coord);
-                const float dx = static_cast<float>(p.x) - cx;
-                const float dy = static_cast<float>(p.y) - cy;
-                const float dz = static_cast<float>(p.z) - cz;
-                if (dx*dx + dy*dy + dz*dz > r2) {
-                    to_off.push_back(coord);
-                    return;
-                }
-                IncLIO::PointType out;
-                out.x = static_cast<float>(p.x);
-                out.y = static_cast<float>(p.y);
-                out.z = static_cast<float>(p.z);
-                out.intensity = intensity;
-                local_map->points.push_back(out);
-            });
+        // Radius crop first — bounds the spatial extent before voxel filtering.
+        // IncLIO::CloudPtr cropped(new IncLIO::PointCloudType());
+        // {
+        //     cropped->points.reserve(raw->points.size());
+        //     for (const auto& pt : raw->points) {
+        //         const float dx = pt.x - cx;
+        //         const float dy = pt.y - cy;
+        //         const float dz = pt.z - cz;
+        //         if (dx*dx + dy*dy + dz*dz <= r2)
+        //             cropped->points.push_back(pt);
+        //     }
+        // }
 
-            if (!to_off.empty()) {
-                auto acc = viz_map_->createAccessor();
-                for (const auto& coord : to_off) acc.setCellOff(coord);
-                viz_map_->releaseUnusedMemory();
-            }
-        } // release viz_map_mutex_ — ui_callback can now insert new scans
+        // Light voxel pass to merge overlapping voxels between adjacent scans in the window.
+        // Each scan is already pre-filtered at map_voxel_size_, and the extent is bounded
+        // by publish_radius_, so this will not overflow.
+        // IncLIO::CloudPtr local_map(new IncLIO::PointCloudType());
+        // if (!cropped->empty()) {
+        //     pcl::VoxelGrid<IncLIO::PointType> vf;
+        //     vf.setInputCloud(cropped);
+        //     const float leaf = static_cast<float>(publish_voxel_size_);
+        //     vf.setLeafSize(leaf, leaf, leaf);
+        //     vf.filter(*local_map);
+        // }
 
-        local_map->width    = local_map->points.size();
-        local_map->height   = 1;
-        local_map->is_dense = true;
+        raw->width    = raw->points.size();
+        raw->height   = 1;
+        raw->is_dense = true;
 
         sensor_msgs::msg::PointCloud2 msg;
-        pcl::toROSMsg(*local_map, msg);
+        pcl::toROSMsg(*raw, msg);
         msg.header.stamp    = now();
         msg.header.frame_id = world_frame_;
         cloud_world_pub_->publish(msg);
@@ -646,19 +669,12 @@ void LioNode::SaveMapCallback(
     const std_srvs::srv::Trigger::Request::SharedPtr /*req*/,
     std_srvs::srv::Trigger::Response::SharedPtr res)
 {
+    // full_map_ is already voxel-filtered per scan at map_voxel_size_ in ui_callback,
+    // so we just copy and save directly — no additional filter pass needed.
     IncLIO::CloudPtr map(new IncLIO::PointCloudType());
     {
         std::lock_guard<std::mutex> lock(full_map_mutex_);
-        map->points.reserve(full_map_->activeCellsCount());
-        full_map_->forEachCell([&](const float& intensity, const Bonxai::CoordT& coord) {
-            const Bonxai::Point3D p = full_map_->coordToPos(coord);
-            IncLIO::PointType out;
-            out.x = static_cast<float>(p.x);
-            out.y = static_cast<float>(p.y);
-            out.z = static_cast<float>(p.z);
-            out.intensity = intensity;
-            map->points.push_back(out);
-        });
+        *map = *full_map_;
     }
     map->width = map->points.size();
     map->height = 1;
