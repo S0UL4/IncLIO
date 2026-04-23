@@ -139,6 +139,10 @@ class LIO {
     // is Keyframe or not ?
     bool IsKeyframe(const SE3& current_pose);
 
+    /// Get frame number 
+    int frame_num() const { return frame_num_; }
+
+
    private:
     bool LoadFromYAML(const std::string& yaml_file);
 

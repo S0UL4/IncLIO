@@ -18,14 +18,13 @@ from launch_ros.actions import Node
 def generate_launch_description():
     # ── Declare arguments ─────────────────────────────────────────────────────
     args = [
-        DeclareLaunchArgument("config_file",      default_value="config/osdome128.yaml",
+        DeclareLaunchArgument("config_file",      default_value="/home/soula/Desktop/PROJECTS/iheb_slam/src/IncLIO/config/osdome128.yaml",
                               description="Path to IncLIO YAML config file"),
-        DeclareLaunchArgument("imu_topic",         default_value="/ouster2/imu",
+        DeclareLaunchArgument("imu_topic",         default_value="/ouster/imu",
                               description="IMU topic"),
-        DeclareLaunchArgument("lidar_topic",       default_value="/ouster2/points",
+        DeclareLaunchArgument("lidar_topic",       default_value="/ouster/points",
                               description="LiDAR PointCloud2 topic"),
         DeclareLaunchArgument("map_voxel_size",     default_value="0.05"),
-        DeclareLaunchArgument("local_map_scans",     default_value="20"), # number of scans in local map ( increasing this will increase accuracy but also CPU usage so the system may fail to run in real-time )
         DeclareLaunchArgument("publish_voxel_size",     default_value="0.1"), # voxel size for published point cloud ( increasing this will increase accuracy but also CPU usage so the system may fail to run in real-time )
         DeclareLaunchArgument("publish_radius",     default_value="80.0"),    # crop radius around current pose
         DeclareLaunchArgument("publish_rate_hz",     default_value="10.0"), #
@@ -46,7 +45,6 @@ def generate_launch_description():
         parameters=[{
             "config_file":      LaunchConfiguration("config_file"),
             "map_voxel_size":   LaunchConfiguration("map_voxel_size"),
-            "local_map_scans":  LaunchConfiguration("local_map_scans"),
             "publish_voxel_size":  LaunchConfiguration("publish_voxel_size"),
             "publish_radius":  LaunchConfiguration("publish_radius"),
             "publish_rate_hz":  LaunchConfiguration("publish_rate_hz"),

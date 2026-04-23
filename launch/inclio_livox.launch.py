@@ -30,8 +30,8 @@ def generate_launch_description():
         DeclareLaunchArgument("lidar_topic",       default_value="/livox/lidar",
                               description="LiDAR PointCloud2 topic"),
         DeclareLaunchArgument("map_voxel_size",     default_value="0.05"),
-        DeclareLaunchArgument("publish_voxel_size",     default_value="0.05"), # voxel size for published point cloud ( increasing this will increase accuracy but also CPU usage so the system may fail to run in real-time )
-        DeclareLaunchArgument("publish_radius",     default_value="50.0"),    # crop radius around current pose
+        DeclareLaunchArgument("publish_voxel_size",     default_value="0.01"), # voxel size for published point cloud ( increasing this will increase accuracy but also CPU usage so the system may fail to run in real-time )
+        DeclareLaunchArgument("publish_radius",     default_value="100.0"),    # crop radius around current pose
         DeclareLaunchArgument("publish_rate_hz",     default_value="10.0"), #
         DeclareLaunchArgument("world_frame",       default_value="world"),
         DeclareLaunchArgument("body_frame",        default_value="body"),

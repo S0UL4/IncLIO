@@ -23,20 +23,30 @@ namespace IncLIO {
 //      (de-skew each point to the scan-end timestamp)
 
 struct IMUProcessorConfig {
-    // Static initialization parameters
-    double init_time_seconds = 5.0;      // time duration for static state
-    int init_imu_queue_max_size = 2000;   // max size of IMU queue for initialization
-    int static_odom_pulse = 5;            // odom pulse threshold for static state
-    double max_static_gyro_var = 0.5;     // max gyro variance for static state
-    double max_static_acce_var = 1.0;    // max acce variance for static state
-    double gravity_norm = 9.81;           // gravity norm
-    bool use_speed_for_static_checking = true;  // whether to use odom to check for static state
+    // Init mode
+    // true  → collect static data, estimate biases and gravity from IMU variance
+    // false → use prior_bg / prior_ba immediately; only collect enough samples for imu_dt_
+    bool use_static_init = true;
 
-    // TODO: Noise parameters for propagation
-    // double accel_noise;
-    // double gyro_noise;
-    // double accel_bias_noise;
-    // double gyro_bias_noise;
+    // Static initialization parameters (used only when use_static_init = true)
+    double init_time_seconds = 5.0;
+    int init_imu_queue_max_size = 2000;
+    int static_odom_pulse = 5;
+    double max_static_gyro_var = 0.5;
+    double max_static_acce_var = 1.0;
+    bool use_speed_for_static_checking = true;
+
+    double gravity_norm = 9.81;
+
+    // Prior biases (used when use_static_init = false)
+    Vec3d prior_bg = Vec3d::Zero();
+    Vec3d prior_ba = Vec3d::Zero();
+
+    // Prior gravity in body frame (used when use_static_init = false).
+    // If zero, gravity direction is estimated from mean accelerometer — only valid
+    // when the platform is stationary at startup. For moving-start bags set this
+    // explicitly, e.g. {0, 0, -9.81} for a level-mounted IMU (z-down convention).
+    Vec3d prior_gravity = Vec3d::Zero();
 };
 
 class IMUProcessor {

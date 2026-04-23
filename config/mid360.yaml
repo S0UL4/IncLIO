@@ -5,7 +5,7 @@ preprocess:
   lidar_type: 1
   scan_line: 6
   time_scale: 1e6           # Livox offset_time is in nanoseconds
-  imu_coeff: 1.0                # set to 9.81 if using raw accel in m/s²
+  imu_coeff: 9.81                # set to 9.81 if using raw accel in m/s²
 
 mapping:
   extrinsic_T: [ -0.011, -0.02329, 0.04412 ]
@@ -13,14 +13,24 @@ mapping:
                  0, 1, 0,
                  0, 0, 1 ]
 
-point_filter_num: 4
+point_filter_num: 1
 max_iteration: 10
 
 with_ui: false
 
 max_static_acce_var: 0.05
-max_static_gyro_var: 0.01
+max_static_gyro_var: 0.05
 imu_init_time: 7.0
+
+# Set use_static_init: false to skip static initialization and use prior biases.
+# Useful when start system while already moving ( for better results , use the static initialization).
+# prior_gravity must be set in body frame when use_static_init is false;
+# [0, 0, -9.81] assumes a level-mounted IMU with z-down convention.
+use_static_init: false
+prior_bg: [-0.000252,  0.000481, -0.002086]
+prior_ba: [ 0.000127, -0.000228, -0.012919]
+prior_gravity: [0.0, 0.0, -9.81]
 
 # DLIO continuous-time motion correction (set false to use original slerp/lerp)
 use_ct_undistort: true
+

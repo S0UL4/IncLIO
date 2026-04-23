@@ -363,7 +363,7 @@ bool LIO::IsKeyframe(const SE3& current_pose) {
     SE3 delta = last_kf_pose_.inverse() * current_pose;
     bool is_kf = delta.translation().norm() > config_.map_update_dist_th ||
                   delta.so3().log().norm() > math::deg2rad(config_.map_update_angle_th_deg);
-    if(is_kf)
+    if(is_kf)  // force keyframe every 20 frames to prevent long gaps (e.g. during low-texture
     {
         INCLIO_DEBUG("=== keyframe detected, frame_num_ {}", frame_num_);
         last_kf_pose_ = current_pose;

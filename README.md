@@ -11,7 +11,7 @@ A real-time LiDAR-Inertial Odometry system built on an **Iterated Error-State Ka
 ### Core Odometry
 - **IESKF** with iterated NDT observation model for accurate pose correction
 - **IMU forward propagation** between LiDAR scans for high-rate odometry (100+ Hz), anchored by the corrected state after each NDT alignment
-- **Motion-compensated undistortion** — each point is transformed to scan-end using interpolated IMU poses
+- **Continuous-time motion-compensated undistortion** — DLIO constant-jerk / angular-acceleration analytical model (eq. 5, Chen et al. 2023) corrects each point to scan-end time; falls back to slerp/lerp via `use_ct_undistort: false`
 - **18-DOF error state**: position, velocity, rotation, accelerometer bias, gyroscope bias, gravity
 
 ### NDT Map

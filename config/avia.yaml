@@ -20,7 +20,16 @@ with_ui: false
 
 max_static_acce_var: 0.05
 max_static_gyro_var: 0.01
-imu_init_time: 10.0
+imu_init_time: 7.0
+
+# Set use_static_init: false to skip static initialization and use prior biases.
+# Useful when start system while already moving ( for better results , use the static initialization).
+# prior_gravity must be set in body frame when use_static_init is false;
+# [0, 0, -9.81] assumes a level-mounted IMU with z-down convention.
+use_static_init: true
+prior_bg: [-0.000252,  0.000481, -0.002086]
+prior_ba: [ 0.000127, -0.000228, -0.012919]
+prior_gravity: [0.0, 0.0, -9.81]
 
 # DLIO continuous-time motion correction (set false to use original slerp/lerp)
-use_ct_undistort: false
+use_ct_undistort: true

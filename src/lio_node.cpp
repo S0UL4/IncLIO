@@ -159,12 +159,26 @@ bool LioNode::InitLIO() {
     IncLIO::LIOConfig lio_config;
 
     // IMU init params
+    if (yaml["use_static_init"])
+        lio_config.imu_config.use_static_init = yaml["use_static_init"].as<bool>();
     if (yaml["imu_init_time"])
         lio_config.imu_config.init_time_seconds = yaml["imu_init_time"].as<double>();
     if (yaml["max_static_gyro_var"])
         lio_config.imu_config.max_static_gyro_var = yaml["max_static_gyro_var"].as<double>();
     if (yaml["max_static_acce_var"])
         lio_config.imu_config.max_static_acce_var = yaml["max_static_acce_var"].as<double>();
+    if (yaml["prior_bg"]) {
+        auto v = yaml["prior_bg"].as<std::vector<double>>();
+        lio_config.imu_config.prior_bg = IncLIO::Vec3d(v[0], v[1], v[2]);
+    }
+    if (yaml["prior_ba"]) {
+        auto v = yaml["prior_ba"].as<std::vector<double>>();
+        lio_config.imu_config.prior_ba = IncLIO::Vec3d(v[0], v[1], v[2]);
+    }
+    if (yaml["prior_gravity"]) {
+        auto v = yaml["prior_gravity"].as<std::vector<double>>();
+        lio_config.imu_config.prior_gravity = IncLIO::Vec3d(v[0], v[1], v[2]);
+    }
 
     // IMU-LiDAR extrinsics
     if (yaml["mapping"]) {
@@ -409,7 +423,7 @@ void LioNode::ProcessCloud(IncLIO::FullCloudPtr cloud, double ts,
 
     PublishOdometry(stamp, pose, state);
     if (publish_path_)  PublishPath(stamp, pose);
-    if (publish_cloud_ && lio_->WasKeyframe()) PublishCloud(stamp, pose);
+    if (publish_cloud_ && (lio_->WasKeyframe() || lio_->frame_num() % 10 == 0)) PublishCloud(stamp, pose);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

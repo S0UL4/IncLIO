@@ -18,15 +18,14 @@ from launch_ros.actions import Node
 def generate_launch_description():
     # ── Declare arguments ─────────────────────────────────────────────────────
     args = [
-        DeclareLaunchArgument("config_file",      default_value="config/velodyne32.yaml",
+        DeclareLaunchArgument("config_file",      default_value="/home/soula/Desktop/PROJECTS/iheb_slam/src/IncLIO/config/velodyne32.yaml",
                               description="Path to IncLIO YAML config file"),
         DeclareLaunchArgument("imu_topic",         default_value="/imu_raw",
                               description="IMU topic"),
         DeclareLaunchArgument("lidar_topic",       default_value="/points_raw",
                               description="LiDAR PointCloud2 topic"),
-        DeclareLaunchArgument("map_voxel_size",     default_value="0.2"),
-        DeclareLaunchArgument("local_map_scans",     default_value="20"), # number of scans in local map ( increasing this will increase accuracy but also CPU usage so the system may fail to run in real-time )
-        DeclareLaunchArgument("publish_voxel_size",     default_value="0.1"), # voxel size for published point cloud ( increasing this will increase accuracy but also CPU usage so the system may fail to run in real-time )
+        DeclareLaunchArgument("map_voxel_size",     default_value="0.05"),
+        DeclareLaunchArgument("publish_voxel_size",     default_value="0.01"), # voxel size for published point cloud ( increasing this will increase accuracy but also CPU usage so the system may fail to run in real-time )
         DeclareLaunchArgument("publish_radius",     default_value="80.0"),    # crop radius around current pose
         DeclareLaunchArgument("publish_rate_hz",     default_value="10.0"), #
         DeclareLaunchArgument("world_frame",       default_value="world"),
