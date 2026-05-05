@@ -1,0 +1,416 @@
+================================================================================
+  IncLIO — Loop Closure Integration Plan (NDTMC-based)
+================================================================================
+
+Goal: add NDT-Map-Code (NDTMC) loop closure to IncLIO, reusing the project's
+own NDT voxel implementation (common/ndt/) instead of pulling in
+pcl::VoxelGridCovariance like the reference integrations do.
+
+References:
+  - NDTMC descriptor library:      /home/soula/NDTMC/
+  - Integration reference:         /home/soula/NDTMC-LIO-SAM/
+  - Current project state:         src/IncLIO/CLAUDE.md
+
+================================================================================
+  DECISIONS LOCKED (validated with Iheb)
+================================================================================
+
+  D1. SCOPE STAGING       Phase A (detection only) FIRST. Validate on bags.
+                          Phase B (closure + backend) only after A is solid.
+
+  D2. BACKEND CHOICE      g2o (Phase B). Reason: developer familiarity beats
+                          ISAM2's marginal incremental-relinearization win on
+                          a sparse loop-closure graph. We will run a batch
+                          SparseOptimizer solve on aLoopIsClosed events.
+
+  D3. DESCRIPTOR SOURCE   Snapshot voxels from the live NdtMap at keyframe
+                          creation time, transformed into LiDAR frame
+                          (Z shifted by LIDAR_HEIGHT so ground sits at z=0
+                          for CalculateLayer). NOT a fresh ScanLocalNdtGrid.
+
+                          Why: NDTMC consumes only mean/cov/evals/nr_points.
+                          eigenvalues are rotation-invariant; cov rotates as
+                          R^T·cov·R; mean transforms by R^T·(mean - t).
+                          Mathematically identical to re-voxelizing, but
+                          uses mature Gaussians from many scans — denser,
+                          more stable descriptors, especially on Mid-360.
+
+                          Snapshot is taken on the LIDAR thread (same
+                          thread that already mutates NdtMap), so no new
+                          lock contention. Snapshot lives inside the
+                          Keyframe struct, descriptor thread reads it
+                          lock-free.
+
+--------------------------------------------------------------------------------
+  Key design decision — REUSE OUR OWN NDT, DO NOT VENDOR pcl::VoxelGridCovariance
+--------------------------------------------------------------------------------
+
+NDTMC's descriptor only reads four things per voxel (from NDTMC.cpp::getNDTLeaves):
+  1. mean        (Vec3d)   — bins the voxel into ring/sector via xy2theta
+  2. cov         (Mat3d)   — cov.determinant() for Gaussian entropy term
+  3. eigenvalues (sorted)  — shape classification: value = λmax·λmin / λmid²
+  4. nr_points   (int)     — validity filter (>=5)
+
+Our IncLIO::NdtVoxel (common/ndt/ndt_voxel.hpp) already stores:
+  - mu_          ≡ mean
+  - sigma_       ≡ cov
+  - num_pts_     ≡ nr_points
+  - ndt_estimated_
+
+Eigenvalues aren't cached but are a single Eigen::SelfAdjointEigenSolver call
+away on sigma_. Everything NDTMC consumes we already compute.
+
+WHY NOT just feed NdtMap::grids_ to the descriptor? Because NDTMC is a
+scan-level, LiDAR-centric descriptor:
+  - bins voxels by azimuth/range/height relative to the SENSOR
+  - expects a single-scan voxelization in the LiDAR local frame
+
+Our NdtMap is:
+  - in the WORLD frame
+  - accumulated across many scans
+  - LRU-evicted at capacity=100000
+
+→ we cannot reuse NdtMap directly. We reuse the NdtVoxel CLASS, not the
+NdtMap class, building a small per-keyframe, scan-local voxelizer.
+
+================================================================================
+  STEPS
+================================================================================
+
+--------------------------------------------------------------------------------
+  Step 1 — Scope staging  [LOCKED: A first, then B]
+--------------------------------------------------------------------------------
+  (a) Phase A: NDTMC loop DETECTION + ICP verification, publish loop events
+      + ICP-computed delta pose. No backend, no map correction.
+  (b) Phase B: Full loop CLOSURE: (a) + g2o pose-graph backend that rewrites
+      the keyframe trajectory, + map rebuild from corrected poses.
+
+WHY it matters: (a) is ~1–2 weeks and non-invasive. (b) is 3–4× more code
+and changes how the front-end interacts with the map.
+
+A first, then B. Matches the existing CLAUDE.md guidance that IMU
+pre-integration should only be added WITH the graph backend, not before.
+
+--------------------------------------------------------------------------------
+  Step 2 — Port ONLY the descriptor math into IncLIO (not pcl::VoxelGridCovariance)
+--------------------------------------------------------------------------------
+Create two new files:
+  src/IncLIO/IncLIO/common/ndt/ndt_descriptor.hpp
+  src/IncLIO/IncLIO/common/ndt/ndt_descriptor.cpp
+
+Public API consumes pre-snapshotted voxels (Step 3); descriptor module is
+pure math + binning, no voxelization, no PCL on the hot path:
+
+    struct NdtSnapshot {
+        Vec3d mean;     // in LiDAR frame, z shifted so ground=0
+        Mat3d cov;      // in LiDAR frame
+        Vec3d evals;    // sorted ascending, precomputed
+        int   n_pts;
+    };
+
+    struct NdtDescriptorConfig {
+        int    pc_num_ring   = 20;
+        int    pc_num_sector = 60;
+        int    pc_num_z      = 6;
+        double pc_max_radius = 80.0;
+        double pc_max_z      = 6.0;
+    };
+
+    class NdtDescriptor {
+        // Build 2*R x S descriptor + 1x10 histogram from snapshot voxels.
+        void Build(const std::vector<NdtSnapshot>& voxels,
+                   Eigen::MatrixXd& desc_out,
+                   Eigen::VectorXd& hist_out) const;
+
+        // NDTMC-LIO-SAM's distanceBtnScanContext: SC-style sectorkey-bounded
+        // shift search + NDTMC element-wise metric (distDirectNDTMC).
+        // Returns (similarity, best yaw shift).
+        static std::pair<double,int> Distance(const Eigen::MatrixXd& a,
+                                              const Eigen::MatrixXd& b);
+    };
+
+IMPORTANT — what NDTMC-LIO-SAM actually runs (verified 2026-05-05 by reading
+src/NDTMC-LIO-SAM/src/NdtMapCode.cpp:183-294):
+
+  detectLoopClosureID() calls distanceBtnScanContext (line 257), NOT
+  distanceBtnNDTScanContext. The latter is dead code in NDTMC-LIO-SAM.
+
+  distanceBtnScanContext is a HYBRID:
+    - SC-style shift search: sectorkey vkey + bounded SEARCH_RADIUS shifts
+      (fastAlignUsingVkey + 0.5*SEARCH_RATIO*cols radius)
+    - Plain circshift (column rotation, NOT circshiftNDTMC)
+    - distDirectNDTMC inner metric (mean-centered correlation, NOT distDirectSC)
+
+  circshiftNDTMC (the unrolled-buffer expand-to-2N-1-cols trick used by the
+  paper's distanceBtnNDTScanContext) is unused in the LIO integration.
+
+Port ~200 lines from NDTMC-LIO-SAM/src/NdtMapCode.cpp (NOT the original
+NDTMC.cpp — the LIO integration is what we want):
+  - xy2theta, CalculateSectorId, CalculateLayer
+  - GridCell::addShape (per-bin shape histogram)
+  - plain circshift, distDirectNDTMC
+  - fastAlignUsingVkey, makeSectorkeyFromNdtMapCode (the SC-style speedup)
+  - distanceBtnScanContext (the actual matching function)
+  - getNDTLeaves-equivalent assembly of the 2*PC_NUM_RING × PC_NUM_SECTOR
+    matrix, but iterating NdtSnapshot (not pcl::Leaf)
+
+DO NOT PORT:
+  - distanceBtnNDTScanContext + circshiftNDTMC (dead code in NDTMC-LIO-SAM,
+    only used by the original paper's brute-force matcher)
+
+DROP from NDTMC.cpp:
+  - readKittiBin, readNIOBin, readPCD, saveDesc                (file I/O)
+  - NIO/KITTI-specific helpers                                  (dataset glue)
+  - pcl::VoxelGridCovariance machinery                          (we have our own)
+  - GetDistributionWeight (eigenvalue compute) — already done at snapshot time
+
+WHY: keeps the code in our style, avoids redundant voxelization, no PCL
+VoxelGridCovariance on the hot path. The descriptor becomes a first-class
+IncLIO module, not a shimmed third-party lib.
+
+--------------------------------------------------------------------------------
+  Step 3 — Snapshot NdtMap voxels at keyframe time  [REPLACES ScanLocalNdtGrid]
+--------------------------------------------------------------------------------
+Add a small helper (inclio/loop_closure.cpp or in NdtMap itself):
+
+    // Snapshot all valid voxels within radius of T_W_L.translation(),
+    // transformed into LiDAR frame, eigenvalues precomputed.
+    // z shifted by lidar_height so ground sits at z=0 (NDTMC convention).
+    void SnapshotLocalVoxels(const NdtMap& map,
+                             const SE3&    T_W_L,
+                             double        radius_world,
+                             double        lidar_height,
+                             double        pc_max_z,
+                             std::vector<NdtSnapshot>& out);
+
+Per voxel:
+    Vec3d mean_L = R^T * (mean_W - t)
+    mean_L.z()  += lidar_height                      // ground -> 0
+    if mean_L.z() < 0 || mean_L.z() > pc_max_z: drop
+    if (mean_L - origin).norm() > radius_world: drop  // approximate cylinder
+    Mat3d cov_L = R^T * cov_W * R
+    Vec3d evals = SelfAdjointEigenSolver(cov_W).eigenvalues()  // rotation-invariant
+    n_pts = voxel.num_pts_
+
+WHY no fresh ScanLocalNdtGrid:
+  - NDTMC's only inputs are mean / cov / evals / n_pts.
+  - Eigenvalues are rotation-invariant -> compute once on world cov.
+  - cov rotates as R^T·cov·R; mean transforms by R^T·(mean - t).
+  - Snapshot is mathematically identical to fresh voxelization in LiDAR frame
+    BUT uses voxels matured over many scans -> denser, more stable descriptor,
+    critical on Mid-360 (narrow FoV per scan).
+
+Threading: snapshot runs on the LIDAR thread, same thread that already
+mutates NdtMap, so no new lock is needed for the snapshot itself.
+
+Cost: O(voxels_in_sphere). On a 100k-voxel map at ~80m radius the inner
+loop is ~few k iterations, ~1ms. Done once per keyframe (~1Hz typical).
+
+Voxel size: inherits the existing ndt_voxel_size from LIOConfig (1.0 m).
+
+--------------------------------------------------------------------------------
+  Step 4 — Introduce a keyframe database in the front-end
+--------------------------------------------------------------------------------
+Add a Keyframe struct + database (in inclio/loop_closure.hpp, new file):
+
+    struct Keyframe {
+        int      id;
+        double   timestamp;
+        SE3      T_world_lidar;
+        CloudPtr raw_scan_lidar;             // for ICP verification (Step 6)
+        std::vector<NdtSnapshot> map_voxels_local;  // snapshot from NdtMap (Step 3)
+        Eigen::MatrixXd descriptor;          // 2*PC_NUM_RING × PC_NUM_SECTOR
+        Eigen::VectorXd histogram;           // 1×10 pre-filter key
+    };
+
+Trigger: on every scan where WasKeyframe() == true (LIDAR thread):
+  1. Capture {id, timestamp, T_world_lidar, raw_scan_lidar}
+  2. Run SnapshotLocalVoxels (Step 3) -> map_voxels_local
+  3. Push the partially-filled Keyframe to the queue
+
+The descriptor + histogram fields are filled later by the loop thread
+(Step 5). Splitting it this way keeps the LIDAR thread off the descriptor
+math (~10–40 ms) while still capturing map state at the right pose.
+
+WHY: NDTMC is indexed per keyframe; we need both the descriptor (for matching)
+and the raw cloud (for ICP verification in Step 6). Also the minimum data
+structure a future GTSAM backend needs.
+
+LIO::IsKeyframe() and last_was_keyframe_ already exist. We only need the
+capture + queue.
+
+--------------------------------------------------------------------------------
+  Step 5 — Dedicated loop-closure thread (off the hot path)
+--------------------------------------------------------------------------------
+Add a fourth callback group or a std::thread owned by LioNode:
+  - loop_cb_group_ (MutuallyExclusive) on the MultiThreadedExecutor, OR
+  - a plain std::thread + condition_variable
+
+Thread responsibilities:
+  1. Pop new keyframes from the queue
+  2. Build ScanLocalNdtGrid on the raw_scan_lidar
+  3. Compute descriptor + histogram via the new ndt_descriptor module
+  4. Store in the keyframe DB
+  5. At ~1 Hz: call DetectLoopClosureID(current_key_id) → (cand_id, yaw_shift)
+
+WHY: descriptor construction + voxelization is 10–40 ms per call. Running
+it on the LiDAR callback would blow the scan budget. A separate thread with
+its own mutex keeps ProcessCloud timing untouched (CLAUDE.md threading
+model is carefully balanced — see "imu_buf_mutex_" + "scan_queue_mutex_"
+locking discipline).
+
+Update CLAUDE.md's threading table with:
+  - loop_cb_group_: descriptor/detect — writes keyframe_db_
+  - keyframe_queue_mutex_: protects keyframe ingest queue
+  - keyframe_db_mutex_: protects keyframe DB + descriptor storage
+
+--------------------------------------------------------------------------------
+  Step 6 — ICP verification of detected loops
+--------------------------------------------------------------------------------
+When DetectLoopClosureID returns (cand_id != -1):
+  1. Aggregate N neighbor keyframes around cand_id (like LIO-SAM's
+     loopFindNearKeyframes, N = historyKeyframeSearchNum, default 25).
+  2. PCL ICP between current keyframe cloud and aggregated neighborhood.
+  3. Reject if !hasConverged() or fitness_score > threshold (tunable, start 0.3).
+  4. Otherwise compute the delta pose from ICP.
+
+WHY: NDTMC says "these two places look similar", not "here is the relative
+transform". Without ICP verification, false positives corrupt the pose
+graph. Both SC_DIST_THRES (0.4–0.7) and historyKeyframeFitnessScore should
+be exposed as ROS params.
+
+--------------------------------------------------------------------------------
+  Step 7 — Publish detections (SCOPE (a) STOPS HERE)
+--------------------------------------------------------------------------------
+Topics to expose:
+  ~/loop_closures   visualization_msgs/MarkerArray  — link markers in RViz
+  ~/loop_correction geometry_msgs/PoseStamped       — ICP-computed delta
+  ~/loop_history    sensor_msgs/PointCloud2         — candidate history cloud
+
+WHY: visual feedback in RViz to tune thresholds + validate detection
+quality BEFORE touching the map. If you chose scope (a), this is the
+stopping point.
+
+--------------------------------------------------------------------------------
+  Step 8 — Pose-graph backend  [Phase B, LOCKED: g2o]
+--------------------------------------------------------------------------------
+Add g2o as a dependency (libg2o). Reason for choosing g2o over GTSAM:
+developer familiarity. ISAM2's incremental relinearization is marginally
+nicer but on a sparse loop-closure pose graph a batch LM solve is fast
+enough (sub-100ms even at thousands of nodes).
+
+Sketch:
+  - g2o::SparseOptimizer with BlockSolver_6_3 + LinearSolverCSparse
+    (or LinearSolverEigen if csparse is awkward to package), LM algorithm.
+  - VertexSE3 per keyframe (id = keyframe id).
+  - EdgeSE3 (odometry) added on every new keyframe with the IESKF-derived
+    relative pose. Information matrix = a small diagonal noise model
+    initially (e.g. trans 0.01 m, rot 0.01 rad), tune later.
+  - EdgeSE3 (loop) on each verified loop with:
+      * relative pose from ICP (Step 6)
+      * Cauchy/Huber robust kernel (g2o::RobustKernelCauchy)
+      * information matrix scaled by ICP fitness score
+  - On loop close: optimizer.initializeOptimization(); optimize(N=10..30);
+    pull back corrected vertex poses; mark "needs map rebuild".
+
+Pattern to MIRROR (translate from GTSAM to g2o, structure is identical):
+  NDTMC-LIO-SAM/src/NDTMC-LIO-SAM/src/mapOptmization.cpp::
+    saveKeyFramesAndFactor   -> AddOdometryEdge
+    addLoopFactor            -> AddLoopEdge
+    correctPoses             -> ApplyOptimizedPoses
+
+WHY: this is where DETECTION becomes CLOSURE. Without this, detecting a
+loop changes nothing. The g2o EdgeSE3 / VertexSE3 path is well-trodden
+in many open-source SLAM stacks.
+
+--------------------------------------------------------------------------------
+  Step 9 — Map correction strategy
+--------------------------------------------------------------------------------
+Do NOT correct the live front-end NdtMap (would invalidate in-flight IESKF
+registrations). Instead:
+  - Keep NdtMap as-is (local NDT, online, incremental)
+  - On aLoopIsClosed: invalidate full_map_ + rebuild by transforming each
+    stored keyframe cloud by its new corrected pose
+  - Drop local_scan_window_ + rebuild from the latest corrected keyframes
+  - Republish ~/cloud_world
+
+WHY: the save service map + visualization are what "a closed loop" should
+fix. The live NdtMap is local/short-horizon and will reconverge naturally
+on subsequent scans. This is what most production systems do and avoids
+race conditions with the lidar thread.
+
+--------------------------------------------------------------------------------
+  Step 10 — Threading & synchronization audit
+--------------------------------------------------------------------------------
+Update the CLAUDE.md threading table with:
+
+  Group            | Callbacks                   | Shared data written
+  -----------------|-----------------------------|------------------------
+  loop_cb_group_   | loop thread                 | keyframe_db_, descriptors,
+                   |                             | gtsam_graph_, pose_corrections_
+
+  New mutexes:
+    keyframe_queue_mutex_  — ingest queue between lidar thread and loop thread
+    keyframe_db_mutex_     — descriptor DB
+    graph_mutex_           — gtSAMgraph + iSAM2 (scope b only)
+
+Audit all shared writes to prop_state_, full_map_, local_scan_window_. In
+particular, Step 9's map rebuild must coordinate with the timer thread —
+do it by handing the timer thread a "pending pose correction" flag that
+drains + rebuilds on the NEXT tick, not mid-write.
+
+WHY: the existing CLAUDE.md documents a carefully worked-out lock ordering.
+Violating it silently is how you get heap corruption like the MessageSync
+data race bug. Treat this as a review checklist, not an afterthought.
+
+--------------------------------------------------------------------------------
+  Step 11 — Params, launch, tests
+--------------------------------------------------------------------------------
+Expose in YAML:
+  loop_closure.enable                     (bool, default false)
+  loop_closure.min_keyframe_gap           (int, default 30)
+  loop_closure.search_frequency_hz        (double, default 1.0)
+  loop_closure.ndtmc.pc_num_ring          (int, default 20)
+  loop_closure.ndtmc.pc_num_sector        (int, default 60)
+  loop_closure.ndtmc.pc_max_radius        (double, default 80.0)
+  loop_closure.ndtmc.lidar_height         (double, set per-platform)
+  loop_closure.ndtmc.sc_dist_thres        (double, default 0.6)
+  loop_closure.icp.max_corr_dist          (double, default 150.0)
+  loop_closure.icp.fitness_score_th       (double, default 0.3)
+
+Test plan:
+  - KITTI 00 / 05 / 07 (known loops) — validate detection on saved bags
+  - Livox / Hesai bags from your platform (retune LIDAR_HEIGHT, PC_MAX_RADIUS)
+  - Watch ~/loop_closures markers in RViz BEFORE enabling the backend
+  - Keep loop_closure.enable=false by default so CI / nominal runs are untouched
+
+WHY: NDTMC defaults are tuned for Velodyne-64 at ground-vehicle heights.
+Livox Mid-360 or Hesai128 on your robot will need retuning — wrong params
+give zero detections or a flood of false positives.
+
+================================================================================
+  RECOMMENDED ORDER OF EXECUTION
+================================================================================
+
+Phase A (loop DETECTION): steps 2 → 3 → 4 → 5 → 6 → 7 → 11
+  (~1–2 weeks, no map correction, no backend)
+  Stop here and VALIDATE on bags.
+
+Phase B (loop CLOSURE): steps 8 → 9 → 10
+  (~2–3 weeks, GTSAM integration, map rebuild)
+  Only start once Phase A detection quality is confirmed.
+
+================================================================================
+  REMINDERS FOR THE IMPLEMENTER
+================================================================================
+
+- Do NOT pull in pcl::VoxelGridCovariance. We have our own NdtVoxel.
+- DO snapshot NdtMap into LiDAR frame at keyframe time (D3) — eigenvalues
+  rotation-invariant, cov rotates as R^T·cov·R, mean as R^T·(mean - t).
+  Cross-scan-matured Gaussians are an asset on Mid-360, not a problem.
+- Don't forget LIDAR_HEIGHT z-shift so ground sits at z=0 (NDTMC convention).
+- Keep the descriptor thread off the LiDAR/IMU/timer hot paths. The LIDAR
+  thread does ONLY the snapshot (~1ms), descriptor math runs elsewhere.
+- Stage the implementation: detection + RViz markers BEFORE any backend work.
+- Follow CLAUDE.md's feedback rule: keep changes minimal for the current
+  sequential pipeline. No pre-integration, no premature abstractions.

@@ -32,9 +32,14 @@ class NdtRegistration {
     void SetNdtMap(NdtMap* ndt_map) { ndt_map_ = ndt_map; }
 
     /// Standalone Gauss-Newton NDT alignment.
-    /// @param init_pose  initial guess (updated in-place on success)
+    /// @param init_pose     initial guess (updated in-place on success)
+    /// @param mean_res_out  optional: last-iteration mean Mahalanobis residual
+    ///                      (total_res / effective_num)
+    /// @param eff_num_out   optional: last-iteration count of effective matches
     /// @return true if converged with enough effective points
-    bool AlignNdt(SE3& init_pose);
+    bool AlignNdt(SE3& init_pose,
+                  double* mean_res_out = nullptr,
+                  int*    eff_num_out  = nullptr);
 
     /// Compute Jacobians and residuals for IESKF update (18-dim state).
     /// The IESKF state is [p(3), v(3), R(3), ba(3), bg(3), g(3)].

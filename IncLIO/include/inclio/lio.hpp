@@ -61,7 +61,7 @@ struct LIOConfig {
     IMUProcessorConfig imu_config;
 
     // NDT map options
-    double ndt_voxel_size = 1.0;
+    double ndt_voxel_size = 0.5;
     int ndt_min_pts_in_voxel = 5;
     int ndt_max_pts_in_voxel = 50;
     size_t ndt_capacity = 100000;
@@ -76,7 +76,7 @@ struct LIOConfig {
     double ieskf_quit_eps = 1e-3;
 
     // Scan processing
-    double scan_voxel_size = 0.5;          // Downsample leaf size for scan
+    double scan_voxel_size = 0.2;          // Downsample leaf size for scan
     double map_update_dist_th = 1.0;       // Min translation to add scan to map
     double map_update_angle_th_deg = 10.0; // Min rotation (deg) to add scan to map
 
@@ -126,6 +126,11 @@ class LIO {
 
     /// Get the current aligned scan (in world frame)
     CloudPtr GetCurrentScan() const { return current_scan_; }
+
+    /// Read-only access to the live NDT map (for loop-closure snapshotting,
+    /// debug visualization, etc.). Caller must access from the LIDAR thread —
+    /// the map is mutated by Align() on that same thread.
+    const NdtMap& GetNdtMap() const { return ndt_map_; }
 
     /// Whether IMU initialization is done
     bool IsInitialized() const { return !imu_need_init_; }

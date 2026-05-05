@@ -1,0 +1,224 @@
+================================================================================
+  NDT — Literature Survey of Improvements
+  Reference doc for picking which NDT enhancement to integrate next.
+  Companion docs:
+    - d2d_ndt_integration.txt        (deep dive on the strongest single lever)
+    - beat_fastlio2_plan.txt         (prioritized roadmap)
+    - steps_per_axis_blending.txt    (degeneracy handling — original idea)
+    - loop_closure_steps.txt         (NDTMC-based loop closure)
+================================================================================
+
+CONTEXT
+───────
+NDT has had ~15 years of incremental improvements + one major reformulation.
+This doc catalogs the families of work and rates them for integration into
+IncLIO (P2D-NDT scan-to-map + IESKF, Mid-360 + IMU, real-time 10 Hz).
+
+
+--------------------------------------------------------------------------------
+  Empirical baseline — Magnusson et al., ICRA 2009
+--------------------------------------------------------------------------------
+"Evaluation of 3D Registration Reliability and Speed — A Comparison of ICP and NDT"
+
+Key findings (Kvarntorp mine, 441 starts, 150m loop):
+  - Convergence basin (loose/strict translation):
+      ICP                 30% / 13%
+      plain NDT           77% / 37%
+      trilinear NDT       95% / 95%
+  - Speed:    plain NDT ~3-5x faster than ICP
+              trilinear NDT ~5x slower than plain NDT (still ~ICP)
+  - Loop accuracy (~150m):
+      plain NDT 2.26m   ICP 2.97m   trilinear NDT 3.99m
+  - NDT failures can be CATASTROPHIC (large rotation error).
+    ICP failures are graceful (rotation OK, translation slides).
+  - Failures are non-monotonic: smaller initial error sometimes fails where
+    larger error succeeds. Root cause: discontinuities in the score function
+    at voxel boundaries.
+
+Trilinear NDT score function (their fix for the discontinuity):
+    s(p) = -1/c * sum_{b=1..8} w(x', q_b) * exp(-1/2 * (x'-q_b)^T C_b^-1 (x'-q_b))
+    where {q_b, C_b} are the 8 cells around x', w() is trilinear weight.
+
+Note re: corridor accuracy: trilinear NDT actually WORSENED loop accuracy
+because it shortened featureless tunnels. The smoother score lets the
+optimizer slide further along the degenerate corridor axis. This is the
+exact failure mode the per-axis blending plan addresses.
+
+
+================================================================================
+  FAMILY 1 — Algorithmic core changes (what residual to optimize)
+================================================================================
+
+D2D-NDT (Distribution-to-Distribution) ★★★★★
+   Stoyanov, Magnusson, Andreasson, Lilienthal — IJRR 2012.
+   "Fast and accurate scan registration through minimization of the distance
+    between compact 3D NDT representations."
+
+   Most important "improve NDT" paper after the original.
+   Voxelizes the SCAN side too. Residuals become per-voxel, not per-point.
+   10-50x fewer residuals, density-invariant weighting, rotation enters
+   covariance not just mean. SEE d2d_ndt_integration.txt FOR FULL DETAIL.
+
+VGICP (Voxelized GICP) ★★★★
+   Koide, Yokozuka, Oishi, Banno — ICRA 2021.
+   "Voxelized GICP for fast and accurate 3D point cloud registration."
+
+   Not strictly NDT — sibling. Voxel-based, Gaussian-per-voxel, but uses
+   GICP's plane-to-plane covariance form (C_a + R C_b R^T)^-1 instead of
+   NDT's exponential. Often outperforms both NDT and GICP. Open-source
+   library: small_gicp (Koide 2024). Good A/B benchmark target.
+
+Trilinear-Interpolated NDT ★★★
+   Magnusson et al., ICRA 2009 (above). Already covered.
+   8-neighbor cell evaluation with trilinear weights. Smooths score-function
+   discontinuities. Still applicable on top of D2D. Cost ~5x.
+
+LiTAMIN / LiTAMIN2 ★★★
+   Yokozuka, Oishi, Thompson, Banno — ICRA 2020/2021.
+   NDT-like Gaussians but symmetric KL-divergence cost. Tuned for real time,
+   better numerical conditioning. Worth reading for cost-function design.
+
+Color / Intensity NDT ★★
+   Magnusson PhD 2009; Stoyanov follow-ups.
+   Adds intensity to each cell's Gaussian. Mid-360 has good reflectivity —
+   could disambiguate corridors with painted/reflective markings where
+   geometry alone is degenerate.
+
+================================================================================
+  FAMILY 2 — Map / structure changes
+================================================================================
+
+Multi-resolution NDT ★★★★
+   Magnusson PhD 2009 (cascaded 2m -> 1m -> 0.5m).
+   Ulas & Temeltas, "3D multi-layered normal distribution transform," 2013.
+
+   Cell-size hierarchy. Cheapest experiment, big basin gain.
+   Cascaded version: 3 successive registrations from coarse to fine,
+   each warm-starting the next. Formal multi-layered version: single score
+   summing across resolutions.
+
+Adaptive Voxel / VoxelMap ★★★★★
+   Yuan et al. — RAL/ICRA 2022.
+   "Efficient and Probabilistic Adaptive Voxel Mapping for Accurate Online
+    LiDAR Odometry."
+
+   Per-voxel plane fitting WITH uncertainty. Octree subdivision when a voxel
+   is non-planar (lambda_min/lambda_mid > threshold). Beats FAST-LIO2 on
+   most published benchmarks. Closest "modern NDT-flavored map" in the lit.
+
+NDT-OM (Occupancy-aware NDT) ★★
+   Saarinen, Andreasson, Stoyanov, Lilienthal — IJRR 2013.
+   "3D normal distributions transform occupancy maps."
+
+   Adds free-space / occupancy modeling so unobserved cells don't poison
+   registration. More invasive map change. Probably not worth it before
+   loop closure.
+
+Linked-Cells / Adaptive Cells
+   Magnusson PhD. Empty cells store pointer to nearest occupied cell so
+   point lookups outside the surface still produce a contribution.
+
+iVox (sparse voxel hash, FAST-LIO competitor) ★★★
+   Bai et al. — RAL 2022 (Faster-LIO).
+   Validates that voxel-hash maps outperform ikd-tree by 1.5-2x. IncLIO's
+   NdtMap is already on this side architecturally.
+
+================================================================================
+  FAMILY 3 — Application-specific NDT
+================================================================================
+
+NDTMC (loop closure descriptor) ★★★★ (already on plan)
+   Hu et al. 2023. NDT-based scan context. See loop_closure_steps.txt.
+
+NDT-MCL (Monte Carlo Localization)
+   Saarinen et al., IROS 2013.
+
+NDT keypoints / global NDT
+   Magnusson PhD. Keypoints from cells with strong eigenvalue separation.
+   Useful for relocalization later.
+
+================================================================================
+  FAMILY 4 — Robustness / degeneracy (orthogonal to "improve NDT itself")
+================================================================================
+
+Solution Remapping / Degenerate-direction projection
+   Zhang, Kaess, Singh — ICRA 2016.
+   "On degeneracy of optimization-based state estimators for localization."
+   Binary degenerate-direction detection from Hessian SVD. Per-axis blending
+   (this project) generalizes it to continuous σ.
+
+X-ICP — Localizability-aware ICP ★★★★
+   Tuna, Nubert, Khattak, Hutter — T-RO 2024.
+   Modern formulation. Concepts transfer directly to NDT (same SVD).
+
+Learning-based localizability
+   Nubert et al., IROS 2022.
+
+Degeneracy-aware factors
+   Hinduja, Ho, Kaess — IROS 2019.
+   Same spirit at the factor-graph level — relevant once GTSAM backend exists.
+
+
+================================================================================
+  PRIORITY FOR INCLIO (sorted by ROI)
+================================================================================
+
+1. D2D-NDT residual                          ★★★★★  (see d2d_ndt_integration.txt)
+   - 10-50x fewer residuals
+   - Density-invariant, better-conditioned HTVH for blending
+   - Reuses ScanLocalNdtGrid you'll build for loop closure anyway
+
+2. Coarse-to-fine multi-resolution           ★★★★
+   - Cheapest experiment, no algorithm change
+   - 1.0m -> 0.5m cascade in 2 passes
+
+3. VoxelMap-style plane-aware adaptive voxel ★★★★
+   - Promote "is voxel planar?" flag from eigenvalues
+   - Switch to point-to-plane residual when planar
+   - Octree subdivision on non-planar voxels (bigger lift)
+
+4. Per-axis blending                         ★★★★  (already planned, ORIGINAL idea)
+   - Continuous σ blend NDT + IMU per DOF
+   - Degenerate-zone state machine + recovery ramp
+   - See steps_per_axis_blending.txt
+
+5. NDTMC loop closure                        ★★★★  (already planned)
+   - Phase A detection, Phase B GTSAM
+   - See loop_closure_steps.txt
+
+6. Trilinear NDT interpolation               ★★★
+   - Basin widener, complementary to all above
+   - Cost ~5x; consider only on first IESKF iteration
+
+7. Robust Cauchy kernel on residuals         ★★★
+   - One scalar reweighting per residual in HTVH accumulation
+   - Big robustness win for free
+
+8. VGICP A/B benchmark                       ★★★
+   - Not to replace NDT, just to know if NDT is in the right ballpark
+   - small_gicp (Koide 2024) is plug-and-play
+
+9. Color / intensity NDT                     ★★
+   - Mid-360 reflectivity could help in textured-but-degenerate corridors
+   - Bigger commitment
+
+10. NDT-OM (occupancy)                       ★★
+    - Defer until loop closure backend exists
+
+
+================================================================================
+  REMINDERS
+================================================================================
+- Citations from training data — verify before basing decisions on them.
+- The "NDT diverges in some scenes" intuition is real but nuanced. NDT
+  beat ICP on accuracy AND speed in the 2009 evaluation; the failure mode
+  is unpredictable rather than worse-on-average.
+- Trilinear NDT can WORSEN accuracy in corridors (shortens tunnels). It
+  widens basin at the cost of slipping along degenerate axes. Per-axis
+  blending must be in place before adding trilinear, or you trade one
+  problem for another.
+- Modern LIO winners (DLIO, iG-LIO, Point-LIO, KISS-ICP) have moved away
+  from pure NDT — but most use voxel+Gaussian residuals that are NDT in
+  spirit. The architecture we have is the right architecture; the residual
+  formulation is what to evolve.
+================================================================================

@@ -50,6 +50,11 @@ class NdtMap {
     /// Get valid nearby voxels for a query point (in world coordinates)
     std::vector<NdtVoxel*> GetNearbyVoxels(const Vec3d& point);
 
+    /// Iterate every voxel currently in the map (read-only).
+    /// Returned reference is the LRU list, ordered most-recently-used first.
+    using KeyAndData = std::pair<KeyType, NdtVoxel>;
+    const std::list<KeyAndData>& GetAllVoxels() const { return data_; }
+
     /// Convert a world-frame point to its voxel grid index
     KeyType PointToKey(const Vec3d& point) const {
         return CastToInt(point * options_.inv_voxel_size);
@@ -75,7 +80,6 @@ class NdtMap {
 
     Options options_;
 
-    using KeyAndData = std::pair<KeyType, NdtVoxel>;
     std::list<KeyAndData> data_;  // LRU list: front = most recently used
     std::unordered_map<KeyType, std::list<KeyAndData>::iterator, hash_vec<3>> grids_;
     std::vector<KeyType> nearby_grids_;

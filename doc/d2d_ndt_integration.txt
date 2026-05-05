@@ -1,0 +1,280 @@
+================================================================================
+  D2D-NDT (Distribution-to-Distribution NDT) — Deep Dive + Integration Sketch
+  Source: Stoyanov, Magnusson, Andreasson, Lilienthal.
+          "Fast and accurate scan registration through minimization of the
+           distance between compact 3D NDT representations." IJRR 2012, 31(12).
+  Companion docs:
+    - ndt_improvements_survey.txt
+    - beat_fastlio2_plan.txt
+    - loop_closure_steps.txt  (shares the ScanLocalNdtGrid primitive)
+================================================================================
+
+WHY THIS PAPER MATTERS MOST
+───────────────────────────
+This is the single biggest "improve NDT" lever after the original. It's a
+reformulation of the cost function, not a parameter tweak. Direct port to
+IncLIO is a contained change because:
+  - IncLIO already builds Gaussians per voxel in NdtMap.
+  - The loop closure plan already needs ScanLocalNdtGrid (scan-side voxelizer).
+  - IESKF is unchanged — only ComputeResidualAndJacobians changes.
+
+
+================================================================================
+  1. THE CORE IDEA
+================================================================================
+
+CURRENT — P2D-NDT (Point-to-Distribution):
+   Map  -> per-cell Gaussian (μ_m, Σ_m)
+   Scan -> raw points x_i
+
+   For each scan point i (per IESKF iteration):
+       x_i' = T · x_i
+       look up map voxel (μ_m, Σ_m) at hash(x_i')
+       r_i  = (x_i' − μ_m)^T Σ_m^-1 (x_i' − μ_m)
+       accumulate score, gradient, Hessian
+
+D2D-NDT — voxelize the SCAN side too:
+   Map  -> per-cell Gaussian (μ_m, Σ_m)
+   Scan -> per-cell Gaussian (μ_d, Σ_d)         ← NEW
+
+   For each scan voxel j (per IESKF iteration):
+       μ_d_T = R · μ_d + t
+       Σ_d_T = R · Σ_d · R^T                     ← also rotated
+       look up map voxel (μ_m, Σ_m) at hash(μ_d_T)
+
+       Δ = μ_d_T − μ_m
+       S = Σ_d_T + Σ_m                          ← combined covariance
+       r_j = Δ^T S^-1 Δ
+       accumulate score, gradient, Hessian
+
+The score actually optimized is the Gaussian-Gaussian L2 product
+("expected likelihood"):
+
+           1
+   score = ───────────── · exp( -1/2 · Δ^T S^-1 Δ )
+           (2π)^(3/2)·√|S|
+
+Summed over scan voxels matched to map voxels.
+The Mahalanobis-style Δ^T S^-1 Δ drives the optimizer.
+The 1/√|S| prefactor is what makes rotation contribute through Σ_d_T.
+
+
+================================================================================
+  2. WHY IT IS GENUINELY BETTER (5 reasons, by impact)
+================================================================================
+
+2A. Residual count drops 10–50×
+   Mid-360 scan ~24K subsampled points → ~500 well-populated voxels.
+   P2D evaluates per point. D2D evaluates per voxel.
+   Each IESKF iteration's ComputeResidualAndJacobians becomes O(V_scan)
+   instead of O(N_points). Single biggest practical win.
+
+2B. Density-invariant weighting
+   P2D silently weighs scan regions by point density. A close wall with
+   2000 points dominates a far surface with 50 points — even when the far
+   surface carries useful constraint. D2D weighs each voxel pair equally.
+   For Mid-360 specifically: near-range density >> far-range. P2D is
+   implicitly fitting hardest to the floor under the robot.
+
+2C. Each residual carries more information
+   S = Σ_d_T + Σ_m reflects geometry from BOTH surfaces. Flat-on-flat
+   gives strong constraint along normal, zero along tangent — exactly
+   what GICP also does. P2D's Σ_m alone misses half of that picture.
+   Net: HTVH is better-conditioned along well-constrained directions
+   AND correctly low along degenerate ones. σᵢ (per-axis blending) gets
+   a more honest information signal.
+
+2D. Rotation appears inside the covariance, not just the mean
+   In P2D, rotation only enters through μ_d_T = R·x + t.
+   In D2D, also through Σ_d_T = R·Σ_d·R^T.
+   New Jacobian term ~ Lie-bracket-like coupling [Σ_d, ω]_×.
+   Rotation recovered more reliably, especially when translation is
+   well-constrained but rotation isn't.
+
+2E. Smoother score function
+   P2D has a discontinuity each time a scan point crosses a voxel
+   boundary (which trilinear NDT addresses). D2D voxelizes once at the
+   scan, so per-iteration boundary crossings happen at the much coarser
+   scan-voxel level. Empirically better-behaved Newton/Gauss-Newton.
+
+
+================================================================================
+  3. WHAT YOU GIVE UP
+================================================================================
+
+3A. Voxelization loss on scan side
+    A wall with 100 points across one voxel becomes one Gaussian. Fine
+    detail (small steps, thin posts) gets averaged. Mitigation: smaller
+    voxel size on scan than on map (e.g., map 1.0m, scan 0.5m).
+
+3B. Voxels with <5 points are dropped
+    D2D needs enough points to estimate Σ_d. In sparse outdoor scenes
+    D2D effectively ignores 30-40% of the scan. P2D uses every point.
+
+3C. Slightly more complex Jacobian
+    Derivative of (Σ_d_T + Σ_m)^-1 w.r.t. R is the new term. Stoyanov
+    derives in closed form; ~30 extra lines of code, well-documented.
+
+3D. Voxelizing the scan costs ~5–15 ms per scan
+    One-time per scan (not per IESKF iteration), so amortized across the
+    10-50× residual count reduction inside iterations.
+
+
+================================================================================
+  4. WHAT NEEDS TO CHANGE IN INCLIO
+================================================================================
+
+4.1 Add scan voxelizer (ScanLocalNdtGrid)
+    Already planned for loop closure. Same primitive.
+    File: IncLIO/common/ndt/ndt_descriptor.hpp (or new ndt_scan_grid.hpp)
+
+      class ScanLocalNdtGrid {
+        public:
+          ScanLocalNdtGrid(double voxel_size, int min_pts = 5,
+                           int max_pts = 50);
+          void Build(const CloudPtr& scan_in_lidar_frame);
+          const std::unordered_map<Vec3i, NdtVoxel, hash_vec<3>>& Voxels()
+              const;
+      };
+
+    Build either in lidar frame (transform Gaussians inline per IESKF
+    iteration) or in map frame using the predicted pose (rebuild once,
+    reuse across iterations). Map-frame is faster after the first
+    iteration but loses freshness; lidar-frame is cleaner. Start with
+    lidar-frame.
+
+    Voxel size: start at ndt_voxel_size / 2 (e.g., 0.5m if map is 1m).
+
+4.2 Rewrite ComputeResidualAndJacobians (in NdtMap or wherever residuals
+    are formed for IESKF)
+
+    Pseudocode:
+        for each scan voxel (μ_d, Σ_d):
+            μ_d_T = R * μ_d + t
+            Σ_d_T = R * Σ_d * R^T
+            map_voxel = NdtMap_.LookupNearest(μ_d_T)
+            if !map_voxel.valid: continue
+            (μ_m, Σ_m) = (map_voxel.mu_, map_voxel.sigma_)
+
+            S    = Σ_d_T + Σ_m
+            Sinv = S.inverse()                 // 3×3, cheap
+            Δ    = μ_d_T - μ_m
+            r    = Δ^T Sinv Δ
+
+            // Translation Jacobian (structurally same as P2D)
+            J_t  = 2 * Sinv * Δ                // ∂r/∂t
+
+            // Rotation Jacobian: TWO terms now
+            // (a) from μ_d_T = R·μ_d + t
+            // (b) from Σ_d_T = R·Σ_d·R^T
+            J_r_mean = 2 * Sinv * Δ × (R · μ_d)        // skew-symmetric
+            // (b) involves dΣ_d_T/dR — see Stoyanov §4.2 closed form.
+            J_r_cov  = ...                             // Σ_d, ω coupling
+            J_r      = J_r_mean + J_r_cov
+
+            // Robust kernel weight (optional, RECOMMENDED)
+            w = cauchy_weight(r, k=cauchy_threshold)
+
+            HTVH += w * J^T * Sinv * J         // 6×6 (or 18×18 in IESKF state)
+            HTVr += w * J^T * Sinv * Δ
+        end
+
+    The translation Jacobian is structurally identical to P2D. The
+    rotation Jacobian gets the extra Σ_d-rotation term — paper has the
+    closed-form expression. ~30 LOC.
+
+4.3 IESKF unchanged
+    UpdateUsingCustomObserve still consumes HTVH and HTVr. Only the
+    contents change.
+
+4.4 Outlier handling
+    P2D's per-point Mahalanobis threshold becomes a per-voxel-pair
+    threshold. Same idea, fewer evaluations. Add Cauchy/Tukey weight w.
+
+4.5 Config additions
+    File: config/*.yaml
+
+        d2d_ndt:
+          enable:               true
+          scan_voxel_size:      0.5      # finer than map voxel
+          map_voxel_size:       1.0      # = ndt_voxel_size
+          min_points_per_voxel: 5
+          max_points_per_voxel: 50
+          cauchy_threshold:     1.0      # 0 disables robust kernel
+
+
+================================================================================
+  5. SYNERGY WITH OTHER IN-FLIGHT WORK
+================================================================================
+
+Per-axis blending (Idea 2):
+    HTVH from D2D is more honest than P2D's. σᵢ values become more
+    reliable, especially in the rotation block. Net positive.
+    Caveat: re-tune blend_H_ref AFTER switching to D2D; HTVH magnitudes
+    will differ.
+
+Deferred two-scan validation (Idea 1):
+    Orthogonal — applies to either P2D or D2D anchor outputs.
+
+Loop closure (NDTMC):
+    ScanLocalNdtGrid is shared infrastructure. Strong argument to
+    pursue D2D and loop closure phase A together.
+
+Trilinear interpolation:
+    Still applicable across map cells in D2D. Boundary-discontinuity
+    argument is weaker for D2D (smoother by construction), but trilinear
+    remains a basin-widener if needed.
+
+
+================================================================================
+  6. RECOMMENDED BUILD ORDER (relative to other planned work)
+================================================================================
+
+If you do D2D, do it BEFORE per-axis blending. Blending logic reads HTVH;
+HTVH should be in its final form before tuning σ-thresholds.
+
+Suggested global order:
+  1. ScanLocalNdtGrid                         (shared with loop closure)
+  2. D2D-NDT residual in ComputeResidualAndJacobians
+  3. Robust Cauchy kernel on residuals        (one-line, big win)
+  4. Per-axis blending + degenerate-zone FSM  (re-tune H_ref vs P2D)
+  5. Loop closure phase A (NDTMC detection)
+  6. Trilinear interpolation if basin still too narrow
+  7. Loop closure phase B (GTSAM backend)
+
+
+================================================================================
+  7. WHAT TO MEASURE BEFORE/AFTER
+================================================================================
+
+Speed:
+  - ms per ComputeResidualAndJacobians call
+  - total IESKF wall time per scan
+  - voxelization cost per scan (one-time, before iteration)
+
+Accuracy:
+  - ATE on a known-loop bag (e.g. KITTI 00, 05, 07)
+  - Residual count per scan (sanity check the 10-50× claim)
+  - HTVH eigenvalue spectrum in well-constrained vs degenerate scenes
+
+Robustness:
+  - Pose anchor reject rate
+  - Per-axis σ histogram in corridor traversals
+
+Comparison targets:
+  - IncLIO P2D baseline
+  - FAST-LIO2 (point-to-plane + ikd-tree)
+  - VGICP via small_gicp (sibling architecture)
+
+
+================================================================================
+  REMINDERS
+================================================================================
+- Don't change IESKF Update() — only the residual builder.
+- Voxelize scan in lidar frame first; transform per iteration. Optimize
+  later if profiling demands it.
+- Robust kernel (Cauchy/Tukey) is nearly free and covers dynamic objects
+  + small misalignments without hard rejection. Add it with D2D.
+- D2D voxel size < map voxel size. If equal, you lose detail without
+  benefit.
+================================================================================
