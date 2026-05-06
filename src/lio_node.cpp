@@ -950,19 +950,25 @@ void LioNode::DetectLoopClosure() {
 
     if (!cand.verified) {
         IncLIO::SE3 T_pre_cur;
-        double mean_res = std::numeric_limits<double>::infinity();
-        int    eff_num  = 0;
+        double mean_res  = std::numeric_limits<double>::infinity();
+        int    eff_num   = 0;
+        double shift_t   = 0.0;
+        double shift_deg = 0.0;
         const bool ok = VerifyLoopCandidate(cur_id, cand.id,
-                                             T_pre_cur, mean_res, eff_num);
-        cand.mean_res = mean_res;
-        cand.eff_num  = eff_num;
-        cand.verified = ok;
+                                             T_pre_cur, mean_res, eff_num,
+                                             shift_t, shift_deg);
+        cand.mean_res  = mean_res;
+        cand.eff_num   = eff_num;
+        cand.shift_t   = shift_t;
+        cand.shift_deg = shift_deg;
+        cand.verified  = ok;
 
         if (ok) {
             {
                 std::lock_guard<std::mutex> lk(verified_loops_mutex_);
                 verified_loops_.push_back({cur_id, cand.id, T_pre_cur,
-                                           mean_res, eff_num});
+                                           mean_res, eff_num,
+                                           shift_t, shift_deg});
             }
             {
                 std::lock_guard<std::mutex> lk(closed_pairs_mutex_);
@@ -983,13 +989,15 @@ void LioNode::DetectLoopClosure() {
     if (cand.verified) {
         RCLCPP_INFO(get_logger(),
             "  [VERIFIED]  kf=%d <- kf=%d  desc=%.4f yaw=%.0f deg "
-            "(NDT mean_res=%.3f eff=%d)",
-            cur_id, cand.id, cand.dist, yaw_deg, cand.mean_res, cand.eff_num);
+            "(NDT mean_res=%.3f eff=%d shift=%.3fm/%.2fdeg)",
+            cur_id, cand.id, cand.dist, yaw_deg,
+            cand.mean_res, cand.eff_num, cand.shift_t, cand.shift_deg);
     } else {
         RCLCPP_INFO(get_logger(),
             "  [candidate] kf=%d <- kf=%d  desc=%.4f yaw=%.0f deg "
-            "(NDT mean_res=%.3f eff=%d — rejected)",
-            cur_id, cand.id, cand.dist, yaw_deg, cand.mean_res, cand.eff_num);
+            "(NDT mean_res=%.3f eff=%d shift=%.3fm/%.2fdeg — rejected)",
+            cur_id, cand.id, cand.dist, yaw_deg,
+            cand.mean_res, cand.eff_num, cand.shift_t, cand.shift_deg);
     }
 
     PublishLoopMarkers(cur_pose, cur_id, filtered);
@@ -1005,9 +1013,13 @@ void LioNode::DetectLoopClosure() {
 bool LioNode::VerifyLoopCandidate(int cur_id, int cand_id,
                                   IncLIO::SE3& T_pre_cur_out,
                                   double& mean_res_out,
-                                  int& eff_num_out) {
+                                  int& eff_num_out,
+                                  double& shift_t_out,
+                                  double& shift_deg_out) {
     mean_res_out = std::numeric_limits<double>::infinity();
     eff_num_out  = 0;
+    shift_t_out  = 0.0;
+    shift_deg_out = 0.0;
 
     // Snapshot the candidate keyframe + N predecessors under the DB lock.
     // Cheap shared_ptr copies; descriptor compute happens lock-free.
@@ -1021,9 +1033,17 @@ bool LioNode::VerifyLoopCandidate(int cur_id, int cand_id,
         cur_kf = keyframe_db_[cur_id];
         pre_kf = keyframe_db_[cand_id];
 
+        // Symmetric window [cand_id - N, cand_id + N], clamped to [0, n_db-1].
+        // Upper end is also kept strictly below cur_id's neighborhood so the
+        // submap can never bleed into the current keyframe's own scans (would
+        // cause a trivial self-match). With default N <= lc_min_keyframe_gap_
+        // the cur-side clamp is inactive; it only kicks in if N is raised.
         const int start = std::max(0, cand_id - lc_kf_search_num_);
-        target_kfs.reserve(cand_id - start + 1);
-        for (int i = start; i <= cand_id; ++i) {
+        const int end   = std::min({n_db - 1,
+                                    cand_id + lc_kf_search_num_,
+                                    cur_id  - lc_min_keyframe_gap_});
+        target_kfs.reserve(end - start + 1);
+        for (int i = start; i <= end; ++i) {
             target_kfs.push_back(keyframe_db_[i]);
         }
     }
@@ -1040,9 +1060,8 @@ bool LioNode::VerifyLoopCandidate(int cur_id, int cand_id,
     IncLIO::NdtMap target_map(topts);
 
     RCLCPP_INFO(get_logger(),
-        "  Building NDT map for candidate kf=%d with %zu neighbors "
-        "(%zu total scans), current kf=%d",
-        cand_id, target_kfs.size(), target_kfs.size() + 1, cur_id);
+        "  Building NDT map for candidate kf=%d: submap %zu scans, current kf=%d",
+        cand_id, target_kfs.size(), cur_id);
 
     const Eigen::Matrix4d T_pre_inv = pre_kf->T_W_L.inverse().matrix();
     for (const auto& n : target_kfs) {
@@ -1057,7 +1076,8 @@ bool LioNode::VerifyLoopCandidate(int cur_id, int cand_id,
     if (target_map.NumVoxels() == 0) return false;
 
     // Initial guess: relative odometry pose (cur expressed in pre's frame).
-    IncLIO::SE3 T_pre_cur = pre_kf->T_W_L.inverse() * cur_kf->T_W_L;
+    const IncLIO::SE3 T_init    = pre_kf->T_W_L.inverse() * cur_kf->T_W_L;
+    IncLIO::SE3       T_pre_cur = T_init;
 
     IncLIO::NdtRegistration::Options ropts;
     ropts.max_iteration     = lc_verify_max_iter_;
@@ -1073,6 +1093,13 @@ bool LioNode::VerifyLoopCandidate(int cur_id, int cand_id,
 
     const bool ok = reg.AlignNdt(T_pre_cur, &mean_res_out, &eff_num_out);
     T_pre_cur_out = T_pre_cur;
+
+    // How far did NDT have to pull from the odometry guess? Real loop closures
+    // on a drifting trajectory show non-trivial corrections; near-zero shift
+    // means either drift-free odom or a basin lock-in (possible false positive).
+    const IncLIO::SE3 T_delta = T_init.inverse() * T_pre_cur;
+    shift_t_out   = T_delta.translation().norm();
+    shift_deg_out = T_delta.so3().log().norm() * 180.0 / M_PI;
 
     return ok && eff_num_out >= lc_verify_min_eff_pts_
            && mean_res_out  <  lc_verify_mean_res_thres_;

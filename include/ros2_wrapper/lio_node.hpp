@@ -224,11 +224,13 @@ private:
 
     /// One verified loop measurement (Phase A output, Phase B graph input).
     struct LoopFactor {
-        int          cur_id   = -1;
-        int          pre_id   = -1;
+        int          cur_id    = -1;
+        int          pre_id    = -1;
         IncLIO::SE3  T_pre_cur;            // cur expressed in pre's LiDAR frame
-        double       mean_res = 0.0;
-        int          eff_num  = 0;
+        double       mean_res  = 0.0;
+        int          eff_num   = 0;
+        double       shift_t   = 0.0;      // ||t_NDT - t_odom||  (m)
+        double       shift_deg = 0.0;      // ||R_NDT R_odomᵀ|| as angle (deg)
     };
     std::vector<LoopFactor>      verified_loops_;
     std::mutex                   verified_loops_mutex_;
@@ -256,16 +258,20 @@ private:
         int    id;
         double dist;     // descriptor distance
         int    shift;
-        bool   verified = false;
-        double mean_res = 0.0;
-        int    eff_num  = 0;
+        bool   verified  = false;
+        double mean_res  = 0.0;
+        int    eff_num   = 0;
+        double shift_t   = 0.0;
+        double shift_deg = 0.0;
     };
     void LoopWorkerLoop();
     void DetectLoopClosure();
     bool VerifyLoopCandidate(int cur_id, int cand_id,
                              IncLIO::SE3& T_pre_cur_out,
                              double& mean_res_out,
-                             int& eff_num_out);
+                             int& eff_num_out,
+                             double& shift_t_out,
+                             double& shift_deg_out);
     void PublishLoopMarkers(const IncLIO::SE3& cur_pose, int cur_id,
                             const std::vector<LoopCandidateViz>& candidates);
 };
