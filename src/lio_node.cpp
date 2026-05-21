@@ -5,6 +5,9 @@
 
 #include "ros2_wrapper/lio_node.hpp"
 
+#include "ndt/ndt_map.hpp"
+#include "ndt/ndt_registration.hpp"
+
 #include <pcl_conversions/pcl_conversions.h>
 #include <tf2_eigen/tf2_eigen.hpp>
 
@@ -59,6 +62,14 @@ LioNode::~LioNode() {
     viz_cv_.notify_one();
     if (viz_worker_.joinable()) viz_worker_.join();
 
+    // Stop the loop-closure worker (if started).
+    {
+        std::lock_guard<std::mutex> lk(loop_cv_mutex_);
+        loop_worker_stop_ = true;
+    }
+    loop_cv_.notify_one();
+    if (loop_worker_.joinable()) loop_worker_.join();
+
     if (lio_) {
         lio_->Finish();
     }
@@ -97,6 +108,24 @@ void LioNode::DeclareParameters() {
     declare_parameter<double>("publish_radius", 80.0);    // crop radius around current pose
     declare_parameter<double>("publish_rate_hz", 5.0);    // ~/cloud_world publish rate
     declare_parameter<int>("local_map_scans", 20);        // sliding window size for ~/cloud_world
+
+    // Loop closure (Phase A: detection only — see doc/loop_closure_steps.txt)
+    declare_parameter<bool>  ("loop_closure.enable",              false);
+    declare_parameter<double>("loop_closure.pc_max_radius",       80.0);  // m
+    declare_parameter<double>("loop_closure.lidar_height",        1.73);  // m above ground
+    declare_parameter<double>("loop_closure.pc_max_z",            6.0);   // m above ground
+    declare_parameter<int>   ("loop_closure.min_keyframe_gap",    30);
+    declare_parameter<double>("loop_closure.sc_dist_thres",       0.6);
+    declare_parameter<double>("loop_closure.max_spatial_dist",    25.0);
+    declare_parameter<double>("loop_closure.search_frequency_hz", 1.0);
+    declare_parameter<int>   ("loop_closure.pc_num_ring",         20);
+    declare_parameter<int>   ("loop_closure.pc_num_sector",       60);
+    declare_parameter<int>   ("loop_closure.pc_num_z",            6);
+    declare_parameter<int>   ("loop_closure.kf_search_num",       25);   // submap size
+    declare_parameter<double>("loop_closure.voxel_size",          1.0);  // m
+    declare_parameter<int>   ("loop_closure.verify_max_iter",     25);
+    declare_parameter<int>   ("loop_closure.verify_min_eff_pts",  200);
+    declare_parameter<double>("loop_closure.verify_mean_res_thres", 1.0);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -117,6 +146,50 @@ bool LioNode::InitLIO() {
 
     full_map_      = std::make_shared<IncLIO::PointCloudType>();
     viz_max_scans_ = get_parameter("local_map_scans").as_int();
+
+    loop_closure_enabled_   = get_parameter("loop_closure.enable").as_bool();
+    lc_pc_max_radius_       = get_parameter("loop_closure.pc_max_radius").as_double();
+    lc_lidar_height_        = get_parameter("loop_closure.lidar_height").as_double();
+    lc_pc_max_z_            = get_parameter("loop_closure.pc_max_z").as_double();
+    lc_min_keyframe_gap_    = get_parameter("loop_closure.min_keyframe_gap").as_int();
+    lc_sc_dist_thres_       = get_parameter("loop_closure.sc_dist_thres").as_double();
+    lc_max_spatial_dist_    = get_parameter("loop_closure.max_spatial_dist").as_double();
+    lc_search_frequency_hz_ = get_parameter("loop_closure.search_frequency_hz").as_double();
+    if (loop_closure_enabled_) {
+        IncLIO::NdtDescriptorConfig dcfg;
+        dcfg.pc_num_ring   = get_parameter("loop_closure.pc_num_ring").as_int();
+        dcfg.pc_num_sector = get_parameter("loop_closure.pc_num_sector").as_int();
+        dcfg.pc_num_z      = get_parameter("loop_closure.pc_num_z").as_int();
+        dcfg.pc_max_radius = lc_pc_max_radius_;
+        dcfg.pc_max_z      = lc_pc_max_z_;
+        descriptor_builder_ = IncLIO::NdtDescriptor(dcfg);
+
+        lc_kf_search_num_              = get_parameter("loop_closure.kf_search_num").as_int();
+        kf_voxelizer_cfg_.voxel_size   = get_parameter("loop_closure.voxel_size").as_double();
+        kf_voxelizer_cfg_.max_radius   = lc_pc_max_radius_;
+        kf_voxelizer_cfg_.lidar_height = lc_lidar_height_;
+        kf_voxelizer_cfg_.max_z        = lc_pc_max_z_;
+        lc_verify_max_iter_            = get_parameter("loop_closure.verify_max_iter").as_int();
+        lc_verify_min_eff_pts_         = get_parameter("loop_closure.verify_min_eff_pts").as_int();
+        lc_verify_mean_res_thres_      = get_parameter("loop_closure.verify_mean_res_thres").as_double();
+
+        loop_worker_ = std::thread(&LioNode::LoopWorkerLoop, this);
+        RCLCPP_INFO(get_logger(),
+            "Loop closure: enabled (radius=%.1fm, lidar_height=%.2fm, max_z=%.2fm)",
+            lc_pc_max_radius_, lc_lidar_height_, lc_pc_max_z_);
+        RCLCPP_INFO(get_logger(),
+            "Loop closure: descriptor %dx%d (R=%d S=%d Z=%d, %d cells)",
+            2 * dcfg.pc_num_ring, dcfg.pc_num_sector,
+            dcfg.pc_num_ring, dcfg.pc_num_sector, dcfg.pc_num_z,
+            2 * dcfg.pc_num_ring * dcfg.pc_num_sector);
+        RCLCPP_INFO(get_logger(),
+            "Loop closure: submap kf_search_num=%d voxel_size=%.2fm",
+            lc_kf_search_num_, kf_voxelizer_cfg_.voxel_size);
+        RCLCPP_INFO(get_logger(),
+            "Loop closure: gates min_gap=%d sc_thres=%.2f spatial_thres=%.1fm search_hz=%.1f",
+            lc_min_keyframe_gap_, lc_sc_dist_thres_,
+            lc_max_spatial_dist_, lc_search_frequency_hz_);
+    }
 
     // Body-frame CropBox: removes points within body_crop_radius_ of the sensor origin.
     // setNegative(true) inverts the filter — points INSIDE the box are discarded,
@@ -286,6 +359,11 @@ void LioNode::CreatePublishers() {
         cloud_world_pub_ = create_publisher<sensor_msgs::msg::PointCloud2>("~/cloud_world", 5);
     }
 
+    if (loop_closure_enabled_) {
+        loop_marker_pub_ = create_publisher<visualization_msgs::msg::MarkerArray>(
+            "~/loop_closures", 10);
+    }
+
     path_msg_.header.frame_id = world_frame_;
 
     save_map_srv_ = create_service<std_srvs::srv::Trigger>(
@@ -433,6 +511,24 @@ void LioNode::ProcessCloud(IncLIO::FullCloudPtr cloud, double ts,
     PublishOdometry(stamp, pose, state);
     if (publish_path_)  PublishPath(stamp, pose);
     if (publish_cloud_ && (lio_->WasKeyframe() || lio_->frame_num() % 10 == 0)) PublishCloud(stamp, pose);
+
+    // ── Loop closure: capture a Keyframe on every keyframe event ─────────────
+    // LIDAR thread only stashes the raw scan + pose. Voxelization and
+    // descriptor build happen on the loop thread once the N-neighbor submap
+    // can be assembled — keeps this thread off the critical path and makes
+    // the descriptor inputs symmetric forward/reverse.
+    if (loop_closure_enabled_ && lio_->WasKeyframe()) {
+        auto kf = std::make_shared<IncLIO::Keyframe>();
+        kf->id              = next_keyframe_id_++;
+        kf->timestamp       = ts;
+        kf->T_W_L           = pose;
+        kf->raw_scan_lidar  = lio_->GetCurrentScan();
+        {
+            std::lock_guard<std::mutex> lock(keyframe_queue_mutex_);
+            keyframe_queue_.push_back(std::move(kf));
+        }
+        loop_cv_.notify_one();
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -660,6 +756,463 @@ void LioNode::VizWorkerLoop() {
         msg.header.frame_id = world_frame_;
         cloud_world_pub_->publish(msg);
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// LoopWorkerLoop  (loop_worker_ thread — descriptor build + candidate search)
+// ─────────────────────────────────────────────────────────────────────────────
+// Drains keyframe_queue_, builds the NDTMC descriptor for each new keyframe
+// and appends it to keyframe_db_. At lc_search_frequency_hz_, runs a top-K
+// search of the current keyframe against the historical DB (with a min-gap
+// guard). Phase A only logs candidates — Step 6 adds ICP verification, Step 7
+// adds RViz markers.
+void LioNode::LoopWorkerLoop() {
+    using clock = std::chrono::steady_clock;
+    auto last_search = clock::now();
+    const auto search_period = std::chrono::milliseconds(
+        std::max(1, static_cast<int>(1000.0 / lc_search_frequency_hz_)));
+
+    while (true) {
+        {
+            std::unique_lock<std::mutex> lk(loop_cv_mutex_);
+            loop_cv_.wait_for(lk, std::chrono::milliseconds(200),
+                              [this] { return loop_worker_stop_; });
+            if (loop_worker_stop_) break;
+        }
+
+        // Drain pending keyframes (cheap swap under queue lock).
+        std::deque<IncLIO::KeyframePtr> pending;
+        {
+            std::lock_guard<std::mutex> qlock(keyframe_queue_mutex_);
+            pending.swap(keyframe_queue_);
+        }
+
+        // Build the N-neighbor submap, voxelize fresh, and compute the
+        // descriptor for each pending keyframe before publishing into the DB.
+        for (auto& kf : pending) {
+            if (!kf->raw_scan_lidar) continue;
+
+            // Snapshot up to lc_kf_search_num_ predecessors. Cheap shared_ptr
+            // copies under the DB lock; descriptor work happens lock-free.
+            std::vector<IncLIO::KeyframePtr> neighbors;
+            {
+                std::lock_guard<std::mutex> dblock(keyframe_db_mutex_);
+                const int n_db   = static_cast<int>(keyframe_db_.size());
+                const int start  = std::max(0, n_db - lc_kf_search_num_);
+                neighbors.assign(keyframe_db_.begin() + start, keyframe_db_.end());
+            }
+
+            // Transform each neighbor scan into the target keyframe's LiDAR
+            // frame. The target's own scan is already there.
+            std::vector<IncLIO::CloudPtr> submap;
+            submap.reserve(neighbors.size() + 1);
+            submap.push_back(kf->raw_scan_lidar);
+
+            const Eigen::Matrix4d T_target_inv = kf->T_W_L.inverse().matrix();
+            for (const auto& n : neighbors) {
+                if (!n->raw_scan_lidar) continue;
+                const Eigen::Matrix4f T_target_n =
+                    (T_target_inv * n->T_W_L.matrix()).cast<float>();
+                auto transformed = std::make_shared<IncLIO::PointCloudType>();
+                IncLIO::transformCloudOMP(*n->raw_scan_lidar, *transformed, T_target_n);
+                submap.push_back(transformed);
+            }
+
+            IncLIO::BuildKeyframeVoxels(submap, kf_voxelizer_cfg_,
+                                         kf->map_voxels_local);
+
+            descriptor_builder_.Build(kf->map_voxels_local,
+                                       kf->descriptor, kf->histogram);
+
+            RCLCPP_DEBUG(get_logger(),
+                "Loop kf=%d: submap=%zu scans, voxels=%zu",
+                kf->id, submap.size(), kf->map_voxels_local.size());
+
+            std::lock_guard<std::mutex> dblock(keyframe_db_mutex_);
+            keyframe_db_.push_back(kf);
+            keyframe_descriptors_.push_back(kf->descriptor);
+        }
+
+        if (clock::now() - last_search >= search_period) {
+            last_search = clock::now();
+            DetectLoopClosure();
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DetectLoopClosure  (loop_worker_ thread — top-K candidate scan)
+// ─────────────────────────────────────────────────────────────────────────────
+void LioNode::DetectLoopClosure() {
+    int cur_idx = -1;
+    int cur_id  = -1;
+    IncLIO::SE3 cur_pose;
+    Eigen::MatrixXd cur_desc;
+
+    // Snapshot the comparable prefix of the DB so the search runs lock-free.
+    std::vector<Eigen::MatrixXd> historical;
+    {
+        std::lock_guard<std::mutex> dblock(keyframe_db_mutex_);
+        if (keyframe_db_.empty()) return;
+        cur_idx = static_cast<int>(keyframe_db_.size()) - 1;
+        if (cur_idx < lc_min_keyframe_gap_) return;
+        cur_desc = keyframe_descriptors_[cur_idx];
+        cur_id   = keyframe_db_[cur_idx]->id;
+        cur_pose = keyframe_db_[cur_idx]->T_W_L;
+        const int prefix = cur_idx - lc_min_keyframe_gap_;
+        historical.assign(keyframe_descriptors_.begin(),
+                          keyframe_descriptors_.begin() + prefix);
+    }
+
+    if (historical.empty()) return;
+
+    // Pass 1 — descriptor distance gate. O(eligible) Distance() calls.
+    // Track the best score regardless of threshold so the per-tick log can
+    // show "the closest match this tick was X" — useful when desc_pass=0 to
+    // tell apart "marginal miss" (0.61) from "completely different" (0.95).
+    int    desc_pass    = 0;
+    double min_dist     = std::numeric_limits<double>::infinity();
+    int    min_dist_idx = -1;
+    std::vector<std::tuple<double, int, int>> scored;
+    scored.reserve(historical.size());
+    for (int i = 0; i < static_cast<int>(historical.size()); ++i) {
+        auto [dist, shift] = IncLIO::NdtDescriptor::Distance(cur_desc, historical[i]);
+        if (dist < min_dist) { min_dist = dist; min_dist_idx = i; }
+        if (dist > lc_sc_dist_thres_) continue;
+        ++desc_pass;
+        scored.emplace_back(dist, i, shift);
+    }
+
+    // Pass 2 — spatial gate. Applied to ALL desc-passed candidates (not just
+    // top-K), so the diagnostic counters show how many places "look similar"
+    // vs. how many "look similar AND are physically near".
+    std::vector<LoopCandidateViz> filtered;
+    filtered.reserve(scored.size());
+    {
+        std::lock_guard<std::mutex> dblock(keyframe_db_mutex_);
+        for (const auto& [dist, cand_idx, shift] : scored) {
+            if (cand_idx < 0 || cand_idx >= static_cast<int>(keyframe_db_.size())) continue;
+            const IncLIO::SE3& cand_pose = keyframe_db_[cand_idx]->T_W_L;
+            const double spatial =
+                (cur_pose.translation() - cand_pose.translation()).norm();
+            if (spatial > lc_max_spatial_dist_) continue;
+            filtered.push_back({cand_pose, keyframe_db_[cand_idx]->id,
+                                dist, shift});
+        }
+    }
+
+    // Capture spatial_pass before reducing to the single best — it's the more
+    // useful stat (how many places passed BOTH gates, not just the winner).
+    const int spatial_pass = static_cast<int>(filtered.size());
+
+    // Single best by descriptor distance — matches NDTMC-LIO-SAM
+    // detectLoopClosureID, which tracks only `if (candidate_dist < min_dist)`.
+    if (filtered.size() > 1) {
+        auto best_it = std::min_element(
+            filtered.begin(), filtered.end(),
+            [](const auto& a, const auto& b) { return a.dist < b.dist; });
+        const auto best = *best_it;
+        filtered.clear();
+        filtered.push_back(best);
+    }
+
+    // Look up the kf id + spatial distance of the closest match (regardless
+    // of whether it passed the gates). This tells you whether the descriptor
+    // *almost* matched something and where.
+    // int    min_dist_kf_id   = -1;
+    // double min_dist_spatial = -1.0;
+    // if (min_dist_idx >= 0) {
+    //     std::lock_guard<std::mutex> dblock(keyframe_db_mutex_);
+    //     if (min_dist_idx < static_cast<int>(keyframe_db_.size())) {
+    //         min_dist_kf_id = keyframe_db_[min_dist_idx]->id;
+    //         min_dist_spatial =
+    //             (cur_pose.translation() -
+    //              keyframe_db_[min_dist_idx]->T_W_L.translation()).norm();
+    //     }
+    // }
+
+    if (filtered.empty()) return;
+
+    // ── Verification: NDT P2D align cur scan against pre-submap NdtMap ──
+    // Skip pairs already verified (dedup) — within a 1-second-long detection
+    // burst the same (cur_id, pre_id) re-fires; one verification is enough.
+    auto& cand = filtered[0];
+    {
+        std::lock_guard<std::mutex> lk(closed_pairs_mutex_);
+        auto range = closed_pairs_.equal_range(cur_id);
+        for (auto it = range.first; it != range.second; ++it) {
+            if (it->second == cand.id) {
+                cand.verified = true;   // already verified previously — re-flag for marker
+                break;
+            }
+        }
+    }
+
+    if (!cand.verified) {
+        IncLIO::SE3 T_pre_cur;
+        double mean_res  = std::numeric_limits<double>::infinity();
+        int    eff_num   = 0;
+        double shift_t   = 0.0;
+        double shift_deg = 0.0;
+        const bool ok = VerifyLoopCandidate(cur_id, cand.id,
+                                             T_pre_cur, mean_res, eff_num,
+                                             shift_t, shift_deg);
+        cand.mean_res  = mean_res;
+        cand.eff_num   = eff_num;
+        cand.shift_t   = shift_t;
+        cand.shift_deg = shift_deg;
+        cand.verified  = ok;
+
+        if (ok) {
+            {
+                std::lock_guard<std::mutex> lk(verified_loops_mutex_);
+                verified_loops_.push_back({cur_id, cand.id, T_pre_cur,
+                                           mean_res, eff_num,
+                                           shift_t, shift_deg});
+            }
+            {
+                std::lock_guard<std::mutex> lk(closed_pairs_mutex_);
+                closed_pairs_.insert({cur_id, cand.id});
+            }
+        }
+    }
+
+    // Per-tick search summary.
+    RCLCPP_INFO(get_logger(),
+        "Loop search: db=%d eligible=%d desc_pass=%d emitted=%d "
+        "(best: kf=%d desc=%.3f)",
+        cur_idx + 1, static_cast<int>(historical.size()),
+        desc_pass, static_cast<int>(filtered.size()),
+        cand.id, min_dist);
+
+    const double yaw_deg = 360.0 * cand.shift / static_cast<double>(cur_desc.cols());
+    if (cand.verified) {
+        RCLCPP_INFO(get_logger(),
+            "  [VERIFIED]  kf=%d <- kf=%d  desc=%.4f yaw=%.0f deg "
+            "(NDT mean_res=%.3f eff=%d shift=%.3fm/%.2fdeg)",
+            cur_id, cand.id, cand.dist, yaw_deg,
+            cand.mean_res, cand.eff_num, cand.shift_t, cand.shift_deg);
+    } else {
+        RCLCPP_INFO(get_logger(),
+            "  [candidate] kf=%d <- kf=%d  desc=%.4f yaw=%.0f deg "
+            "(NDT mean_res=%.3f eff=%d shift=%.3fm/%.2fdeg — rejected)",
+            cur_id, cand.id, cand.dist, yaw_deg,
+            cand.mean_res, cand.eff_num, cand.shift_t, cand.shift_deg);
+    }
+
+    PublishLoopMarkers(cur_pose, cur_id, filtered);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// VerifyLoopCandidate  (loop_worker_ thread)
+// Builds an ephemeral NdtMap from kf_pre + N predecessors (transformed into
+// kf_pre's LiDAR frame), then runs NDT P2D from kf_cur's raw scan with the
+// relative odometry pose as initial guess. Acceptance: AlignNdt converges,
+// ≥ verify_min_eff_pts effective matches, mean residual < verify_mean_res_thres.
+// ─────────────────────────────────────────────────────────────────────────────
+bool LioNode::VerifyLoopCandidate(int cur_id, int cand_id,
+                                  IncLIO::SE3& T_pre_cur_out,
+                                  double& mean_res_out,
+                                  int& eff_num_out,
+                                  double& shift_t_out,
+                                  double& shift_deg_out) {
+    mean_res_out = std::numeric_limits<double>::infinity();
+    eff_num_out  = 0;
+    shift_t_out  = 0.0;
+    shift_deg_out = 0.0;
+
+    // Snapshot the candidate keyframe + N predecessors under the DB lock.
+    // Cheap shared_ptr copies; descriptor compute happens lock-free.
+    std::vector<IncLIO::KeyframePtr> target_kfs;
+    IncLIO::KeyframePtr cur_kf, pre_kf;
+    {
+        std::lock_guard<std::mutex> lock(keyframe_db_mutex_);
+        const int n_db = static_cast<int>(keyframe_db_.size());
+        if (cur_id  < 0 || cur_id  >= n_db) return false;
+        if (cand_id < 0 || cand_id >= n_db) return false;
+        cur_kf = keyframe_db_[cur_id];
+        pre_kf = keyframe_db_[cand_id];
+
+        // Symmetric window [cand_id - N, cand_id + N], clamped to [0, n_db-1].
+        // Upper end is also kept strictly below cur_id's neighborhood so the
+        // submap can never bleed into the current keyframe's own scans (would
+        // cause a trivial self-match). With default N <= lc_min_keyframe_gap_
+        // the cur-side clamp is inactive; it only kicks in if N is raised.
+        const int start = std::max(0, cand_id - lc_kf_search_num_);
+        const int end   = std::min({n_db - 1,
+                                    cand_id + lc_kf_search_num_,
+                                    cur_id  - lc_min_keyframe_gap_});
+        target_kfs.reserve(end - start + 1);
+        for (int i = start; i <= end; ++i) {
+            target_kfs.push_back(keyframe_db_[i]);
+        }
+    }
+    if (!cur_kf || !pre_kf || !cur_kf->raw_scan_lidar || !pre_kf->raw_scan_lidar) {
+        return false;
+    }
+
+    // Build target NdtMap in kf_pre's LiDAR frame (capacity disabled — ephemeral).
+    IncLIO::NdtMap::Options topts;
+    topts.voxel_size       = kf_voxelizer_cfg_.voxel_size;
+    topts.min_pts_in_voxel = kf_voxelizer_cfg_.min_pts_in_voxel;
+    topts.max_pts_in_voxel = kf_voxelizer_cfg_.max_pts_in_voxel;
+    topts.capacity         = std::numeric_limits<size_t>::max();
+    IncLIO::NdtMap target_map(topts);
+
+    RCLCPP_INFO(get_logger(),
+        "  Building NDT map for candidate kf=%d: submap %zu scans, current kf=%d",
+        cand_id, target_kfs.size(), cur_id);
+
+    const Eigen::Matrix4d T_pre_inv = pre_kf->T_W_L.inverse().matrix();
+    for (const auto& n : target_kfs) {
+        if (!n->raw_scan_lidar) continue;
+        const Eigen::Matrix4f T_pre_n =
+            (T_pre_inv * n->T_W_L.matrix()).cast<float>();
+        auto t = std::make_shared<IncLIO::PointCloudType>();
+        IncLIO::transformCloudOMP(*n->raw_scan_lidar, *t, T_pre_n);
+        target_map.AddCloud(t);
+    }
+
+    if (target_map.NumVoxels() == 0) return false;
+
+    // Initial guess: relative odometry pose (cur expressed in pre's frame).
+    const IncLIO::SE3 T_init    = pre_kf->T_W_L.inverse() * cur_kf->T_W_L;
+    IncLIO::SE3       T_pre_cur = T_init;
+
+    IncLIO::NdtRegistration::Options ropts;
+    ropts.max_iteration     = lc_verify_max_iter_;
+    ropts.min_effective_pts = lc_verify_min_eff_pts_;
+    IncLIO::NdtRegistration reg(ropts);
+    reg.SetSource(cur_kf->raw_scan_lidar);
+    reg.SetNdtMap(&target_map);
+
+    RCLCPP_INFO(get_logger(),
+        "  target map size : =%d <- cur ky lidar size =%d "
+        "(NDT init guess: mean_res=%.3f eff=%d)",
+        target_map.NumVoxels(), cur_kf->raw_scan_lidar->size(), mean_res_out, eff_num_out);
+
+    const bool ok = reg.AlignNdt(T_pre_cur, &mean_res_out, &eff_num_out);
+    T_pre_cur_out = T_pre_cur;
+
+    // How far did NDT have to pull from the odometry guess? Real loop closures
+    // on a drifting trajectory show non-trivial corrections; near-zero shift
+    // means either drift-free odom or a basin lock-in (possible false positive).
+    const IncLIO::SE3 T_delta = T_init.inverse() * T_pre_cur;
+    shift_t_out   = T_delta.translation().norm();
+    shift_deg_out = T_delta.so3().log().norm() * 180.0 / M_PI;
+
+    return ok && eff_num_out >= lc_verify_min_eff_pts_
+           && mean_res_out  <  lc_verify_mean_res_thres_;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PublishLoopMarkers  (loop_worker_ thread — RViz visualization of candidates)
+// ─────────────────────────────────────────────────────────────────────────────
+void LioNode::PublishLoopMarkers(const IncLIO::SE3& cur_pose, int cur_id,
+                                 const std::vector<LoopCandidateViz>& candidates) {
+    if (!loop_marker_pub_) return;
+
+    visualization_msgs::msg::MarkerArray arr;
+    const auto stamp = now();
+    const builtin_interfaces::msg::Duration ttl = rclcpp::Duration::from_seconds(2.0);
+
+    auto make_sphere = [&](int id, const std::string& ns, const IncLIO::Vec3d& p,
+                           float r, float g, float b, double diameter) {
+        visualization_msgs::msg::Marker m;
+        m.header.stamp    = stamp;
+        m.header.frame_id = world_frame_;
+        m.ns              = ns;
+        m.id              = id;
+        m.type            = visualization_msgs::msg::Marker::SPHERE;
+        m.action          = visualization_msgs::msg::Marker::ADD;
+        m.pose.position.x = p.x();
+        m.pose.position.y = p.y();
+        m.pose.position.z = p.z();
+        m.pose.orientation.w = 1.0;
+        m.scale.x = m.scale.y = m.scale.z = diameter;
+        m.color.r = r; m.color.g = g; m.color.b = b; m.color.a = 0.9f;
+        m.lifetime = ttl;
+        return m;
+    };
+
+    auto make_text = [&](int id, const std::string& ns, const IncLIO::Vec3d& p,
+                         const std::string& text) {
+        visualization_msgs::msg::Marker m;
+        m.header.stamp    = stamp;
+        m.header.frame_id = world_frame_;
+        m.ns              = ns;
+        m.id              = id;
+        m.type            = visualization_msgs::msg::Marker::TEXT_VIEW_FACING;
+        m.action          = visualization_msgs::msg::Marker::ADD;
+        m.pose.position.x = p.x();
+        m.pose.position.y = p.y();
+        m.pose.position.z = p.z() + 1.5;
+        m.pose.orientation.w = 1.0;
+        m.scale.z = 0.7;
+        m.color.r = 1.0f; m.color.g = 1.0f; m.color.b = 1.0f; m.color.a = 1.0f;
+        m.text = text;
+        m.lifetime = ttl;
+        return m;
+    };
+
+    // Current keyframe — orange sphere + label.
+    arr.markers.push_back(make_sphere(0, "loop_current", cur_pose.translation(),
+                                       1.0f, 0.5f, 0.0f, 1.2));
+    arr.markers.push_back(make_text(0, "loop_current_label", cur_pose.translation(),
+                                     "kf=" + std::to_string(cur_id)));
+
+    // Candidates — green spheres if NDT-verified, red if rejected by verifier.
+    // Verified link line is thick green; rejected link is thin yellow.
+    int marker_id = 0;
+    for (const auto& c : candidates) {
+        const float r_s = c.verified ? 0.0f : 1.0f;
+        const float g_s = c.verified ? 1.0f : 0.2f;
+        const float b_s = 0.0f;
+        const std::string ns_sphere = c.verified ? "loop_verified" : "loop_rejected";
+        arr.markers.push_back(make_sphere(marker_id, ns_sphere,
+                                           c.pose.translation(),
+                                           r_s, g_s, b_s, 1.0));
+        char buf[120];
+        if (c.verified) {
+            std::snprintf(buf, sizeof(buf), "kf=%d  d=%.3f  res=%.2f eff=%d",
+                          c.id, c.dist, c.mean_res, c.eff_num);
+        } else {
+            std::snprintf(buf, sizeof(buf), "kf=%d  d=%.3f  (rejected)",
+                          c.id, c.dist);
+        }
+        arr.markers.push_back(make_text(marker_id,
+                                         c.verified ? "loop_verified_label"
+                                                    : "loop_rejected_label",
+                                         c.pose.translation(), buf));
+
+        visualization_msgs::msg::Marker line;
+        line.header.stamp    = stamp;
+        line.header.frame_id = world_frame_;
+        line.ns              = c.verified ? "loop_link_verified" : "loop_link_rejected";
+        line.id              = marker_id;
+        line.type            = visualization_msgs::msg::Marker::LINE_LIST;
+        line.action          = visualization_msgs::msg::Marker::ADD;
+        line.scale.x         = c.verified ? 0.3 : 0.15;
+        if (c.verified) { line.color.r = 0.0f; line.color.g = 1.0f; line.color.b = 0.0f; }
+        else            { line.color.r = 1.0f; line.color.g = 1.0f; line.color.b = 0.0f; }
+        line.color.a = 0.9f;
+        line.pose.orientation.w = 1.0;
+        line.lifetime = ttl;
+        geometry_msgs::msg::Point p1, p2;
+        p1.x = cur_pose.translation().x();
+        p1.y = cur_pose.translation().y();
+        p1.z = cur_pose.translation().z();
+        p2.x = c.pose.translation().x();
+        p2.y = c.pose.translation().y();
+        p2.z = c.pose.translation().z();
+        line.points.push_back(p1);
+        line.points.push_back(p2);
+        arr.markers.push_back(line);
+
+        ++marker_id;
+    }
+
+    loop_marker_pub_->publish(arr);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

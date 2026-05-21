@@ -26,6 +26,7 @@ find_package(std_msgs REQUIRED)
 find_package(std_srvs REQUIRED)
 find_package(pcl_conversions REQUIRED)
 find_package(PCL REQUIRED COMPONENTS common filters)
+find_package(visualization_msgs REQUIRED)
 
 # Optional Livox support
 find_package(livox_ros_driver2 REQUIRED)
@@ -75,6 +76,7 @@ ament_target_dependencies(inclio_ros2_component
   std_msgs
   pcl_conversions
   std_srvs
+  visualization_msgs
 )
 
 if(livox_ros_driver2_FOUND)
