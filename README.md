@@ -35,7 +35,7 @@ A real-time LiDAR-Inertial Odometry system built on an **Iterated Error-State Ka
 - **Multi-threaded executor** (3 threads) with separate callback groups for IMU, LiDAR, and map visualization
 - **Optional TF subscription** — the node can listen to `/tf` / `/tf_static` to look up the LiDAR→IMU extrinsic (`use_tf_extrinsic`) and the `base_link`→IMU offset, so odometry, path, and TF are published in the **`base_link` frame**; falls back to the YAML extrinsics if the lookup fails
 - **Tightly-coupled wheel odometry fusion** (optional) — `nav_msgs/Odometry` forward speed + yaw rate fused as IESKF observations with non-holonomic constraints, lever-arm compensation, and a chi² slip gate
-- **Real-time map visualization** — sliding window of the last N scans published on `~/cloud_world`, PCL-voxel-downsampled and radius-cropped for bounded publish cost
+- **Real-time map visualization** — sliding window of the last N scans published on `~/cloud_world`, voxel-downsampled per scan for bounded publish cost
 - **Full map accumulation** — raw world-frame points accumulated in `full_map_`, voxel-filtered at save time; never published over the wire
 - **Map save service** (`~/save_map`) — saves the full voxelized map to PCD via `std_srvs/Trigger`
 - **Multi-LiDAR support**: Hesai Pandar, Velodyne, Ouster, Livox Mid-360 (native `CustomMsg`)
@@ -141,7 +141,6 @@ ROS parameters set on the node (sensor decimation, LiDAR type, frames, etc. now 
 | `body_frame` | `"body"` | Fallback TF child frame (overridden by `frames.base_frame` in YAML) |
 | `map_voxel_size` | `0.2` | Voxel leaf size applied per scan before accumulation into `full_map_` and the viz window (meters) |
 | `body_crop_radius` | `1.0` | Points closer than this to the sensor are removed (robot/vehicle body returns, meters) |
-| `publish_radius` | `80.0` | Radius around current pose to include in `~/cloud_world` (meters) |
 | `publish_rate_hz` | `5.0` | Publish rate of `~/cloud_world` (Hz) |
 | `local_map_scans` | `20` | Number of recent scans kept in the sliding window for `~/cloud_world` |
 | `publish_path` | `true` | Publish trajectory |

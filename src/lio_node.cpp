@@ -95,7 +95,6 @@ void LioNode::DeclareParameters() {
     // Map visualization
     declare_parameter<double>("map_voxel_size",    0.2);   // voxel leaf size for full_map_ and viz window
     declare_parameter<double>("body_crop_radius", 1.0);   // remove points closer than this to the sensor (m)
-    declare_parameter<double>("publish_radius", 80.0);    // crop radius around current pose
     declare_parameter<double>("publish_rate_hz", 5.0);    // ~/cloud_world publish rate
     declare_parameter<int>("local_map_scans", 20);        // sliding window size for ~/cloud_world
 }
@@ -112,7 +111,6 @@ bool LioNode::InitLIO() {
     publish_cloud_ = get_parameter("publish_cloud").as_bool();
     map_voxel_size_   = get_parameter("map_voxel_size").as_double();
     body_crop_radius_ = get_parameter("body_crop_radius").as_double();
-    publish_radius_ = get_parameter("publish_radius").as_double();
     publish_rate_hz_ = get_parameter("publish_rate_hz").as_double();
 
     full_map_      = std::make_shared<IncLIO::PointCloudType>();
@@ -772,11 +770,10 @@ void LioNode::ui_callback() {
         viz_map_mutex_.unlock();
     }
 
-    // Wake the viz worker. Pass the crop centre under the cv mutex.
+    // Wake the viz worker.
     {
         std::lock_guard<std::mutex> lk(viz_cv_mutex_);
         viz_work_ready_  = true;
-        viz_crop_center_ = current_pose_;
     }
     viz_cv_.notify_one();
 }
@@ -784,28 +781,19 @@ void LioNode::ui_callback() {
 // ─────────────────────────────────────────────────────────────────────────────
 // VizWorkerLoop  (dedicated std::thread, not in the executor pool)
 // ─────────────────────────────────────────────────────────────────────────────
-// Owns the slow path: concatenate viz_scan_window_, voxel downsample,
-// radius crop, pcl::toROSMsg, publish.
+// Owns the slow path: concatenate viz_scan_window_, pcl::toROSMsg, publish.
 // Woken by ui_callback via viz_cv_. Signals are coalesced — no cycle is
 // permanently lost, just merged if the worker is still running.
 void LioNode::VizWorkerLoop() {
     while (true) {
-        IncLIO::SE3 crop_center;
         {
             std::unique_lock<std::mutex> lk(viz_cv_mutex_);
             viz_cv_.wait(lk, [this] { return viz_work_ready_ || viz_worker_stop_; });
             if (viz_worker_stop_) break;
             viz_work_ready_ = false;
-            crop_center = viz_crop_center_;
         }
 
         if (!publish_cloud_ || !cloud_world_pub_) continue;
-
-        // const auto& t = crop_center.translation();
-        // const float cx = static_cast<float>(t.x());
-        // const float cy = static_cast<float>(t.y());
-        // const float cz = static_cast<float>(t.z());
-        // const float r2 = static_cast<float>(publish_radius_ * publish_radius_);
 
         // Snapshot the sliding window under lock, then release so ui_callback can push.
         IncLIO::CloudPtr raw(new IncLIO::PointCloudType());
@@ -814,31 +802,6 @@ void LioNode::VizWorkerLoop() {
             for (const auto& scan : viz_scan_window_)
                 *raw += *scan;
         }
-
-        // Radius crop first — bounds the spatial extent before voxel filtering.
-        // IncLIO::CloudPtr cropped(new IncLIO::PointCloudType());
-        // {
-        //     cropped->points.reserve(raw->points.size());
-        //     for (const auto& pt : raw->points) {
-        //         const float dx = pt.x - cx;
-        //         const float dy = pt.y - cy;
-        //         const float dz = pt.z - cz;
-        //         if (dx*dx + dy*dy + dz*dz <= r2)
-        //             cropped->points.push_back(pt);
-        //     }
-        // }
-
-        // Light voxel pass to merge overlapping voxels between adjacent scans in the window.
-        // Each scan is already pre-filtered at map_voxel_size_, and the extent is bounded
-        // by publish_radius_, so this will not overflow.
-        // IncLIO::CloudPtr local_map(new IncLIO::PointCloudType());
-        // if (!cropped->empty()) {
-        //     pcl::VoxelGrid<IncLIO::PointType> vf;
-        //     vf.setInputCloud(cropped);
-        //     const float leaf = static_cast<float>(publish_voxel_size_);
-        //     vf.setLeafSize(leaf, leaf, leaf);
-        //     vf.filter(*local_map);
-        // }
 
         raw->width    = raw->points.size();
         raw->height   = 1;

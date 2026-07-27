@@ -168,8 +168,8 @@ private:
 
     // ── World-frame map storage ─────────────────────────────────────────────
     // full_map_        : raw accumulated world-frame points; voxel-filtered on save.
-    // viz_scan_window_ : sliding window of the last viz_max_scans_ world-frame scans;
-    //                    concatenated + voxel-filtered + radius-cropped for publish.
+    // viz_scan_window_ : sliding window of the last viz_max_scans_ world-frame scans
+    //                    (each pre-filtered per scan); concatenated for publish.
     IncLIO::CloudPtr full_map_;
     std::deque<IncLIO::CloudPtr> viz_scan_window_;
     int viz_max_scans_ = 20;
@@ -185,21 +185,19 @@ private:
     double publish_voxel_size_ = 0.3;
 
     pcl::CropBox<IncLIO::PointType> scan_crop_;   // near-field body removal, configured once in InitLIO
-    double publish_radius_     = 80.0;
     double publish_rate_hz_    = 5.0;
 
-    // Latest corrected pose from the lidar thread — used as the crop center.
+    // Latest corrected pose from the lidar thread.
     IncLIO::SE3 current_pose_;
 
     // ── Viz worker state ────────────────────────────────────────────────────
-    // The worker runs voxel downsample + radius crop + publish independently of
+    // The worker concatenates the sliding window and publishes independently of
     // the executor thread pool so that ui_callback always returns in < 5 ms.
     std::thread             viz_worker_;
     std::mutex              viz_cv_mutex_;
     std::condition_variable viz_cv_;
     bool                    viz_work_ready_  = false;
     bool                    viz_worker_stop_ = false;
-    IncLIO::SE3             viz_crop_center_;  // crop centre passed to the worker
 
     // CloudConvertConfig 
     CloudConvertConfig cc;
