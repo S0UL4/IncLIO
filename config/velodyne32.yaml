@@ -48,14 +48,7 @@ wheel_odom:
   yaw_noise:     0.10                     # yaw-rate std-dev [rad/s]
   use_lever_arm: true                     # include lever-arm coupling into gyro bias
   use_yaw_rate:  true                     # include the yaw-rate (gyro-z-bias) row
-  # Chi² slip/drift gate. Forward-speed is gated on its own 1-DOF NIS (a spinning
-  # drive wheel only corrupts forward speed → drop that row, KEEP the NHC rows);
-  # the NHC(+yaw) rows are gated together and a violation (skid) rejects the whole
-  # update. Lower thresholds = stricter. chi² 99%: 1-DOF=6.63, 3-DOF=11.34
-  # (set chi2_nhc=9.21 if use_yaw_rate is false → 2-DOF). Tune on a bag with slip.
-  use_slip_gate: true                     # enable the wheel-slip chi² gate
-  chi2_fwd:      6.63                      # forward-speed NIS gate (1-DOF)
-  chi2_nhc:      11.34                     # NHC(+yaw) Mahalanobis gate (3/2-DOF)
+  chi2_thresh:   13.28                    # slip gate: reject obs with chi2 > this (4-DOF 99%); <= 0 disables
 
 
 frames:

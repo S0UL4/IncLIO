@@ -9,7 +9,9 @@ if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release)
 endif()
 set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG")
-
+if(POLICY CMP0144)
+  cmake_policy(SET CMP0144 NEW)
+endif()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ROS2 dependencies
@@ -28,8 +30,8 @@ find_package(pcl_conversions REQUIRED)
 find_package(PCL REQUIRED COMPONENTS common filters)
 
 # Optional Livox support
-find_package(livox_ros_driver2 REQUIRED)
-
+find_package(livox_ros_driver2 QUIET)
+message(STATUS "livox_ros_driver2_FOUND = '${livox_ros_driver2_FOUND}'")
 # ─────────────────────────────────────────────────────────────────────────────
 # IncLIO core — built directly from source inside this package.
 #
@@ -76,6 +78,13 @@ ament_target_dependencies(inclio_ros2_component
   pcl_conversions
   std_srvs
 )
+
+
+if(livox_ros_driver2_FOUND)
+  message(STATUS "inclio_ros2: livox_ros_driver2 found, enabling Livox support.")
+else()
+  message(STATUS "inclio_ros2: livox_ros_driver2 NOT found, building without Livox support.")
+endif()
 
 if(livox_ros_driver2_FOUND)
   target_compile_definitions(inclio_ros2_component PUBLIC HAVE_LIVOX_ROS_DRIVER2)

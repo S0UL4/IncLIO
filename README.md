@@ -20,8 +20,8 @@ A real-time LiDAR-Inertial Odometry system built on an **Iterated Error-State Ka
 - **Incremental map update** — new scans are inserted only when sufficient motion is detected
 
 ### Map Storage & Visualization
-- **`full_map_`** — raw accumulated world-frame point cloud; voxel-filtered on demand by the save service (`map_voxel_size`, default 0.2 m), never published over the wire
-- **Sliding-window local map** — last `local_map_scans` (default 20) world-frame scans kept in a bounded deque; concatenated, PCL-voxel-downsampled (`publish_voxel_size`, default 0.3 m), and radius-cropped before each publish
+- **`full_map_`** — accumulated world-frame point cloud, voxel-filtered per scan at insertion time (`map_voxel_size`, default 0.2 m); never published over the wire, only written by the save service
+- **Sliding-window local map** — last `local_map_scans` (default 20) world-frame scans kept in a bounded deque; each scan is body-cropped (`body_crop_radius`) and voxel-downsampled before entering the window, then concatenated on a dedicated worker thread for each publish
 - Visualization publish cost is constant regardless of total distance travelled — only the sliding window is serialized
 
 ### Performance
@@ -33,8 +33,8 @@ A real-time LiDAR-Inertial Odometry system built on an **Iterated Error-State Ka
 ### ROS2 Wrapper
 - **Composable node** (`inclio_ros2::LioNode`) compatible with component containers
 - **Multi-threaded executor** (3 threads) with separate callback groups for IMU, LiDAR, and map visualization
-- **IMU-rate TF broadcast** for smooth transforms in RViz2 and downstream nodes
-- **Dual odometry topics**: corrected (`~/odometry` at scan rate) and propagated (`~/odometry_fast` at IMU rate)
+- **Optional TF subscription** — the node can listen to `/tf` / `/tf_static` to look up the LiDAR→IMU extrinsic (`use_tf_extrinsic`) and the `base_link`→IMU offset, so odometry, path, and TF are published in the **`base_link` frame**; falls back to the YAML extrinsics if the lookup fails
+- **Tightly-coupled wheel odometry fusion** (optional) — `nav_msgs/Odometry` forward speed + yaw rate fused as IESKF observations with non-holonomic constraints, lever-arm compensation, and a chi² slip gate
 - **Real-time map visualization** — sliding window of the last N scans published on `~/cloud_world`, PCL-voxel-downsampled and radius-cropped for bounded publish cost
 - **Full map accumulation** — raw world-frame points accumulated in `full_map_`, voxel-filtered at save time; never published over the wire
 - **Map save service** (`~/save_map`) — saves the full voxelized map to PCD via `std_srvs/Trigger`
@@ -81,7 +81,7 @@ You can download the dataset used in the gif here : https://drive.google.com/dri
 ```bash
 # Hesai Pandar128 / Velodyne / generic PointCloud2
 ros2 launch inclio_ros2 inclio_velodyne.launch.py \
-    config_file:=$(ros2 pkg prefix inclio_ros2)/share/inclio_ros2/config/velodyne_ros2.yaml \
+    config_file:=$(ros2 pkg prefix inclio_ros2)/share/inclio_ros2/config/velodyne32.yaml \
     imu_topic:=/imu/data \
     lidar_topic:=/velodyne_points
 
@@ -105,7 +105,8 @@ ros2 service call /inclio_ros2_node/save_map std_srvs/srv/Trigger
 |-------|------|-------------|
 | `~/imu` | `sensor_msgs/Imu` | IMU measurements |
 | `~/points` | `sensor_msgs/PointCloud2` or `livox_ros_driver2/CustomMsg` | LiDAR point cloud |
-| `~/wheel_odom_topic` | `nav_msgs/Odometry` | Wheel odometry (optional) |
+| `wheel_odom_topic` | `nav_msgs/Odometry` | Wheel odometry twist (optional — empty topic name disables fusion) |
+| `/tf`, `/tf_static` | `tf2_msgs/TFMessage` | **Optional** TF listener — used to look up the LiDAR→IMU extrinsic (`use_tf_extrinsic: true`) and the `base_link`→IMU offset so output is expressed in the `base_link` frame |
 
 ### Publications
 
@@ -113,7 +114,7 @@ ros2 service call /inclio_ros2_node/save_map std_srvs/srv/Trigger
 |-------|------|------|-------------|
 | `~/odometry` | `nav_msgs/Odometry` | Scan rate (~10-20 Hz) | NDT-corrected pose |
 | `~/path` | `nav_msgs/Path` | Scan rate | Trajectory history |
-| `~/cloud_world` | `sensor_msgs/PointCloud2` | `publish_rate_hz` (default 5 Hz) | Sliding-window local map, voxel-downsampled and radius-cropped, in world frame |
+| `~/cloud_world` | `sensor_msgs/PointCloud2` | `publish_rate_hz` (default 5 Hz) | Sliding-window local map (last `local_map_scans` scans, voxel-downsampled per scan), in world frame |
 
 ### Services
 
@@ -123,49 +124,81 @@ ros2 service call /inclio_ros2_node/save_map std_srvs/srv/Trigger
 
 ### TF
 
-Broadcasts `world -> body` at IMU rate.
+- **Broadcast**: `world_frame -> base_frame` (e.g. `odom -> base_link`) at scan rate, enabled via `frames.publish_tf` in the YAML config.
+- **Subscription (optional)**: the node runs a TF listener at startup. When `frames.use_tf_extrinsic: true` it reads the `lidar_frame -> imu_frame` extrinsic from the TF tree instead of `mapping.extrinsic_T/R`. Independently, when `base_frame != imu_frame` it also looks up the `base_frame -> imu_frame` offset so odometry, path, and TF are published in the **`base_link` frame** (removes the lever-arm arc on in-place turns). Failed lookups fall back to YAML extrinsics / identity with a warning.
 
 ### Parameters
+
+ROS parameters set on the node (sensor decimation, LiDAR type, frames, etc. now live in the YAML config — see [Configuration](#configuration)):
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `config_file` | `""` | **Required.** Path to IncLIO YAML config |
 | `imu_topic` | `"imu"` | IMU topic name |
 | `lidar_topic` | `"points"` | LiDAR topic name |
-| `lidar_type` | `4` | 1=Livox, 2=Velodyne, 3=Ouster, 4=Hesai |
-| `num_scans` | `128` | Number of scan rings |
-| `time_scale` | `1e-3` | Per-point time field to seconds |
-| `point_filter_num` | `1` | Keep every N-th point |
-| `world_frame` | `"world"` | TF parent frame |
-| `body_frame` | `"body"` | TF child frame (IMU) |
-| `map_voxel_size` | `0.2` | Voxel leaf size applied to `full_map_` at save time (meters) |
-| `publish_voxel_size` | `0.3` | Voxel leaf size applied to `~/cloud_world` before publish (meters) |
+| `wheel_odom_topic` | `""` | Wheel odometry topic (`nav_msgs/Odometry`); **empty disables wheel fusion** |
+| `world_frame` | `"world"` | Fallback TF parent frame (overridden by `frames.world_frame` in YAML) |
+| `body_frame` | `"body"` | Fallback TF child frame (overridden by `frames.base_frame` in YAML) |
+| `map_voxel_size` | `0.2` | Voxel leaf size applied per scan before accumulation into `full_map_` and the viz window (meters) |
+| `body_crop_radius` | `1.0` | Points closer than this to the sensor are removed (robot/vehicle body returns, meters) |
 | `publish_radius` | `80.0` | Radius around current pose to include in `~/cloud_world` (meters) |
 | `publish_rate_hz` | `5.0` | Publish rate of `~/cloud_world` (Hz) |
 | `local_map_scans` | `20` | Number of recent scans kept in the sliding window for `~/cloud_world` |
-| `publish_tf` | `true` | Broadcast TF |
 | `publish_path` | `true` | Publish trajectory |
 | `publish_cloud` | `true` | Publish point cloud map |
 
 ## Configuration
 
-Sensor configuration is done via YAML files in `config/`. Currently using `velodyne_ros2.yaml` configured for a Hesai Pandar128:
+Sensor and pipeline configuration is done via YAML files in `config/` (`velodyne32.yaml`, `hesai128.yaml`, `hesai128_sbg.yaml`, `mid360.yaml`, `osdome128.yaml`, `avia.yaml`). Full annotated example:
 
 ```yaml
 preprocess:
-  lidar_type: 4          # 4 = Hesai Pandar128
-  scan_line: 128         # number of rings
-  time_scale: 1e-3       # per-point time to seconds
+  lidar_type: 2          # 1 = Livox, 2 = Velodyne, 3 = Ouster, 4 = Hesai
+  scan_line: 32          # number of rings
+  time_scale: 1e-3       # per-point time field to seconds
+  imu_coeff: 1.0         # set to 9.81 if the IMU reports acceleration in g
 
-mapping:
+mapping:                 # used only when frames.use_tf_extrinsic is false
   extrinsic_T: [x, y, z]              # LiDAR -> IMU translation
   extrinsic_R: [r00, r01, ..., r22]   # LiDAR -> IMU rotation (row-major 3x3)
 
-point_filter_num: 10     # decimation factor
+point_filter_num: 1      # decimation factor (keep every N-th point)
 max_iteration: 3         # IESKF iterations per scan
-imu_init_time: 10.0      # static initialization duration (seconds)
+
+# IMU initialization — static init estimates biases/gravity while standing still.
+# Set use_static_init: false to start while already moving (uses the priors below;
+# prior_gravity is expressed in the body frame).
+use_static_init: true
+imu_init_time: 5.0       # static initialization duration (seconds)
 max_static_gyro_var: 0.5 # gyro variance threshold for static detection
 max_static_acce_var: 0.2 # accel variance threshold for static detection
+prior_bg: [0.0, 0.0, 0.0]      # gyro bias prior
+prior_ba: [0.0, 0.0, 0.0]      # accel bias prior
+prior_gravity: [0.0, 0.0, -9.81]
+
+# DLIO continuous-time motion correction (false = original slerp/lerp undistortion)
+use_ct_undistort: true
+
+# Wheel-odometry fusion tunables (the topic itself is the ROS param wheel_odom_topic;
+# leave the param empty to disable).
+wheel_odom:
+  r_imu_wheel:   [0.110, -0.180, -0.710]  # IMU -> wheel/axle origin, body frame [m] — measure it!
+  vel_noise:     0.10    # forward-speed std-dev [m/s]
+  nhc_noise:     0.01    # lateral/vertical non-holonomic-constraint std-dev [m/s]
+  yaw_noise:     0.10    # yaw-rate std-dev [rad/s]
+  use_lever_arm: true    # include lever-arm coupling into gyro bias
+  use_yaw_rate:  true    # include the yaw-rate (gyro-z-bias) row
+  chi2_thresh:   13.28   # slip gate: reject obs when chi2 = rᵀS⁻¹r > this (4-DOF, 99%); <= 0 disables
+
+# Frames + optional TF-based extrinsics
+frames:
+  world_frame:       "odom"        # parent of the published odometry/TF
+  base_frame:        "base_link"   # child of the published odometry/TF
+  imu_frame:         "imu_link"    # TF lookup target (lidar->imu, base->imu)
+  lidar_frame:       "velodyne"    # TF lookup source for the lidar->imu extrinsic
+  use_tf_extrinsic:  true          # read lidar->imu from TF instead of mapping.extrinsic_T/R
+  tf_lookup_timeout: 5.0           # seconds to wait for static TFs on startup
+  publish_tf: true                 # broadcast world_frame -> base_frame
 ```
 <!-- ## Architecture
 
@@ -182,3 +215,26 @@ max_static_acce_var: 0.2 # accel variance threshold for static detection
 - **OpenMP** — parallel point cloud operations (undistortion, transform)
 - **spdlog** — logging
 - **yaml-cpp** — configuration parsing
+
+## Acknowledgements & Citation
+
+IncLIO builds on ideas and code from the following excellent open-source projects.
+
+The continuous-time motion-compensated undistortion is based on [Direct LiDAR-Inertial Odometry (DLIO)](https://github.com/vectr-ucla/direct_lidar_inertial_odometry). If you found this work useful, please cite their manuscript:
+
+```bibtex
+@article{chen2022dlio,
+  title={Direct LiDAR-Inertial Odometry: Lightweight LIO with Continuous-Time Motion Correction},
+  author={Chen, Kenny and Nemiroff, Ryan and Lopez, Brett T},
+  journal={2023 IEEE International Conference on Robotics and Automation (ICRA)},
+  year={2023},
+  pages={3983-3989},
+  doi={10.1109/ICRA48891.2023.10160508}
+}
+```
+
+Many thanks also to [lightning-lm](https://github.com/gaoxiang12/lightning-lm) by [@gaoxiang12](https://github.com/gaoxiang12), whose work inspired parts of this system.
+
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=S0UL4/IncLIO&type=Date)](https://star-history.com/#S0UL4/IncLIO&Date)

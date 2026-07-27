@@ -25,8 +25,9 @@
   <!-- PCL bridge -->
   <depend>pcl_conversions</depend>
 
-  <!-- Optional: Livox custom message (comment out if not using Livox) -->
-  <depend>livox_ros_driver2</depend>
+  <!-- Optional: only built if livox_ros_driver2 is available -->
+  <exec_depend>livox_ros_driver2</exec_depend>
+  <build_depend>livox_ros_driver2</build_depend>
 
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>

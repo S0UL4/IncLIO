@@ -61,7 +61,7 @@ void CloudConverter::Process(const sensor_msgs::msg::PointCloud2 & msg, IncLIO::
     //*pcl_out = cloud_out_;
 }
 
-
+#ifdef HAVE_LIVOX_ROS_DRIVER2
 void CloudConverter::Process(const livox_ros_driver2::msg::CustomMsg &msg, IncLIO::FullCloudPtr &pcl_out) {
     switch (cfg_.lidar_type) {
         case LidarType::LIVOX:
@@ -73,7 +73,7 @@ void CloudConverter::Process(const livox_ros_driver2::msg::CustomMsg &msg, IncLI
     }
     pcl_out = std::make_shared<IncLIO::FullPointCloudType>(cloud_out_);
 }
-
+#endif
 void CloudConverter::Oust64Handler(const sensor_msgs::msg::PointCloud2 &msg) {
     cloud_out_.clear();
     pcl::PointCloud<ouster_ros::Point> pl_orig;
@@ -108,7 +108,7 @@ void CloudConverter::Oust64Handler(const sensor_msgs::msg::PointCloud2 &msg) {
     cloud_out_.is_dense = true;
 }
 
-
+#ifdef HAVE_LIVOX_ROS_DRIVER2
 void CloudConverter::AviaHandler(const livox_ros_driver2::msg::CustomMsg &msg) {
     cloud_out_.clear();
     IncLIO::FullPointCloudType cloud_temp;
@@ -149,7 +149,7 @@ void CloudConverter::AviaHandler(const livox_ros_driver2::msg::CustomMsg &msg) {
         }
     }
 }
-
+#endif
 
 
 void CloudConverter::HesaiHandler(const sensor_msgs::msg::PointCloud2 & msg) {
