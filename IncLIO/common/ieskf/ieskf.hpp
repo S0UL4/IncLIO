@@ -5,6 +5,7 @@
 #include "utils/logger.hpp"
 #include "utils/math_utils.hpp"
 #include "inclio/imu.hpp"
+#include "inclio/odom.hpp"
 #include "inclio/state.hpp"
 
 namespace IncLIO {
@@ -31,7 +32,7 @@ class IESKF {
     using Vec18T = Eigen::Matrix<S, 18, 1>;         // 18-dimensional vector type
     using Mat3T = Eigen::Matrix<S, 3, 3>;           // 3x3 matrix type
     using MotionNoiseT = Eigen::Matrix<S, 18, 18>;  // Motion noise type
-    using OdomNoiseT = Eigen::Matrix<S, 3, 3>;      // Odometry noise type
+    using OdomNoiseT = Eigen::Matrix<S, 4, 4>;      // wheel twist noise (fwd, nhc_y, nhc_z, yaw)
     using GnssNoiseT = Eigen::Matrix<S, 6, 6>;      // GNSS noise type
     using Mat18T = Eigen::Matrix<S, 18, 18>;        // 18-dimensional covariance type
     using StateT = State<S>;                  // Overall nominal state variable type
@@ -53,6 +54,24 @@ class IESKF {
         double gnss_pos_noise_ = 0.1;                   // GNSS position noise
         double gnss_height_noise_ = 0.1;                // GNSS height noise
         double gnss_ang_noise_ = 1.0 * math::kDEG2RAD;  // GNSS rotation noise
+
+        // ---- Wheel odometry (nav_msgs/Odometry twist, base_link frame) ----
+        // Lever arm: IMU -> wheel/axle origin, expressed in the IMU body frame [m].
+        // The IMU is NOT on the axle, so this must be set correctly.
+        Vec3d  r_imu_wheel_   = Vec3d(-0.470, 0.0, -0.805);
+
+        // Measurement noise (std-dev). Lateral/vertical (NHC) are tight on purpose.
+        double odom_vel_noise_ = 0.10;   // [m/s]   forward speed   (twist.cov[0]  ≈ 0.01 → 0.1)
+        double odom_nhc_noise_ = 0.02;   // [m/s]   lateral & vertical (NHC)
+        double odom_yaw_noise_ = 0.10;   // [rad/s] yaw rate        (twist.cov[35] ≈ 0.01 → 0.1)
+
+        bool   use_wheel_lever_arm_ = true;   // include hat(r_iw) δbg coupling
+        bool   use_wheel_yaw_rate_  = true;   // include the yaw-rate row
+
+        // Slip gate: reject the wheel observation when chi2 = rᵀS⁻¹r exceeds this
+        // (robot lifted / wheels slipping). 4-DOF 99% ≈ 13.28, 3-DOF ≈ 11.34 when
+        // the yaw row is disabled. <= 0 disables the gate.
+        double odom_chi2_thresh_ = 13.28;
 
         // update bias or not
         bool update_bias_gyro_ = true;  // whether to update gyro bias
@@ -106,6 +125,10 @@ class IESKF {
     /// Update the filter using a custom observation function
     bool UpdateUsingCustomObserve(CustomObsFunc obs);
 
+    /// Wheel forward-speed + non-holonomic-constraint + yaw-rate update
+    /// (gain form, lever-arm). Apply once per wheel-odom message, between scans.
+    bool ObserveWheelSpeed(const Odom& odom);
+
     /// accessors
     /// Get the full nominal state as a NavStateT struct
     StateT GetNominalState() const { return StateT(current_time_, R_, p_, v_, bg_, ba_); }
@@ -128,6 +151,11 @@ class IESKF {
     void SetCov(const Mat18T& cov) { cov_ = cov; }
     Vec3d GetGravity() const { return g_; }
 
+    /// Slip-gate diagnostics: chi2 of the most recent wheel observation and
+    /// the running count of gated (rejected) observations.
+    S GetLastWheelChi2() const { return last_wheel_chi2_; }
+    size_t GetWheelGateRejects() const { return wheel_gate_rejects_; }
+
    private:
     void BuildNoise(const Options& options) {
         double ev = options.acce_var_;
@@ -146,7 +174,12 @@ class IESKF {
         double gp2 = options.gnss_pos_noise_ * options.gnss_pos_noise_; // position noise variance
         double gh2 = options.gnss_height_noise_ * options.gnss_height_noise_; // height noise variance
         double ga2 = options.gnss_ang_noise_ * options.gnss_ang_noise_; // rotation noise variance
-        gnss_noise_.diagonal() << gp2, gp2, gh2, ga2, ga2, ga2;  
+        gnss_noise_.diagonal() << gp2, gp2, gh2, ga2, ga2, ga2;
+
+        double ov2 = options.odom_vel_noise_ * options.odom_vel_noise_;
+        double on2 = options.odom_nhc_noise_ * options.odom_nhc_noise_;
+        double oy2 = options.odom_yaw_noise_ * options.odom_yaw_noise_;
+        odom_noise_.diagonal() << ov2, on2, on2, oy2;   // forward, lateral, vertical, yaw
     }
 
     /// Update the nominal state variables using the current error state (dx)
@@ -181,9 +214,18 @@ class IESKF {
     // covariance
     Mat18T cov_ = Mat18T::Identity();
 
+    // most recent body angular rate (set at top of Predict): needed by the
+    // wheel-odom lever-arm term and yaw row, since ω = gyro − bg.
+    VecT last_gyro_ = VecT::Zero();
+
+    // slip-gate diagnostics (see ObserveWheelSpeed)
+    S last_wheel_chi2_ = S(0);
+    size_t wheel_gate_rejects_ = 0;
+
     // noise
     MotionNoiseT Q_ = MotionNoiseT::Zero();
     GnssNoiseT gnss_noise_ = GnssNoiseT::Zero();
+    OdomNoiseT odom_noise_ = OdomNoiseT::Zero();   // 4x4 wheel-twist noise
 
     Options options_;
 };

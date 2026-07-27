@@ -218,6 +218,28 @@ void CloudConverter::VelodyneHandler(const sensor_msgs::msg::PointCloud2 & msg) 
         return v;
     };
 
+    // NCLT bags name the ring field "l" — fromROSMsg can't map it onto
+    // PointNoIntensity::ring, so read it from the raw bytes instead.
+    int off_ring_alt = -1;
+    uint8_t ring_alt_dtype = 0;
+    bool has_ring_field = false;
+    for (const auto& f : msg.fields) {
+        if (f.name == "ring") { has_ring_field = true; break; }
+        if (f.name == "l") { off_ring_alt = f.offset; ring_alt_dtype = f.datatype; }
+    }
+    auto ring_at = [&](int i) -> int {
+        if (has_ring_field || off_ring_alt < 0) return pl.points[i].ring;
+        const uint8_t* p = raw + static_cast<size_t>(i) * step + off_ring_alt;
+        switch (ring_alt_dtype) {
+            case sensor_msgs::msg::PointField::UINT8:   return *p;
+            case sensor_msgs::msg::PointField::INT8:    return *reinterpret_cast<const int8_t*>(p);
+            case sensor_msgs::msg::PointField::UINT16:  { std::uint16_t v; std::memcpy(&v, p, sizeof(v)); return v; }
+            case sensor_msgs::msg::PointField::UINT32:  { std::uint32_t v; std::memcpy(&v, p, sizeof(v)); return static_cast<int>(v); }
+            case sensor_msgs::msg::PointField::FLOAT32: { float v; std::memcpy(&v, p, sizeof(v)); return static_cast<int>(v); }
+            default: return 0;
+        }
+    };
+
     bool given_offset_time = (pl.points[plsize - 1].time > 0);
 
     if (given_offset_time) {
@@ -260,7 +282,8 @@ void CloudConverter::VelodyneHandler(const sensor_msgs::msg::PointCloud2 & msg) 
 
             if (added_pt.getVector3fMap().squaredNorm() < 16.0f) continue;
 
-            int layer = pl.points[i].ring;
+            int layer = ring_at(i);
+            if (layer < 0 || layer >= cfg_.num_scans) continue;
             double yaw_angle = atan2(added_pt.y, added_pt.x) * 57.2957;
 
             if (is_first[layer]) {

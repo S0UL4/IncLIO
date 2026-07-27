@@ -70,7 +70,8 @@ bool LIO::LoadFromYAML(const std::string& yaml_file) {
         auto ext_r = yaml["mapping"]["extrinsic_R"].as<std::vector<double>>();
         Vec3d lidar_T_wrt_IMU = math::VecFromArray(ext_t);
         Mat3d lidar_R_wrt_IMU = math::MatFromArray(ext_r);
-        config_.T_imu_lidar = SE3(lidar_R_wrt_IMU, lidar_T_wrt_IMU);
+        // Hand-entered YAML matrices are rarely orthogonal to Sophus tolerance; project to nearest rotation
+        config_.T_imu_lidar = SE3(SO3::fitToSO3(lidar_R_wrt_IMU), lidar_T_wrt_IMU);
     }
 
     return true;
@@ -104,6 +105,11 @@ void LIO::AddIMU(IMUPtr imu) {
 void LIO::AddCloud(FullCloudPtr cloud, double timestamp) {
     // MessageSync handles buffering and calls ProcessMeasurements when synced
     sync_->ProcessCloud(cloud, timestamp);
+}
+
+void LIO::AddOdom(const Odom& odom) {
+    // MessageSync buffers wheel-odom alongside IMU for the current scan window
+    sync_->ProcessOdom(odom);
 }
 
 void LIO::ProcessMeasurements(const MeasureGroup& meas) {
@@ -152,6 +158,15 @@ void LIO::TryInitIMU() {
         ieskf_opts.acce_var_ = std::sqrt(imu_processor_.GetCovAcce()[0]);
         ieskf_opts.imu_dt_ = imu_processor_.GetIMUDt();
 
+        // Wheel-odometry fusion params (from YAML / LIOConfig defaults)
+        ieskf_opts.r_imu_wheel_        = config_.wheel_r_imu_wheel;
+        ieskf_opts.odom_vel_noise_     = config_.wheel_vel_noise;
+        ieskf_opts.odom_nhc_noise_     = config_.wheel_nhc_noise;
+        ieskf_opts.odom_yaw_noise_     = config_.wheel_yaw_noise;
+        ieskf_opts.use_wheel_lever_arm_ = config_.wheel_use_lever_arm;
+        ieskf_opts.use_wheel_yaw_rate_  = config_.wheel_use_yaw_rate;
+        ieskf_opts.odom_chi2_thresh_    = config_.wheel_chi2_thresh;
+
         // Compute initial rotation to align body frame with gravity-aligned world frame.
         // The IMU processor gives gravity in the body frame; we need R_ such that
         // R_ * body_gravity = world_gravity, i.e. R_ rotates body to world.
@@ -186,12 +201,34 @@ void LIO::Predict() {
     imu_states_.emplace_back(ieskf_.GetNominalState());
 
     const Vec3d g = ieskf_.GetGravity();
+    auto odom_it = measures_.odom_.begin();   // sorted by timestamp
+    const size_t gate_rejects_before = ieskf_.GetWheelGateRejects();
+
     for (const auto& imu : measures_.imu_) {
+        // apply any wheel-odom message that occurs at/just before this IMU sample.
+        // Guard against stale odom (older than the filter's current time) so the
+        // velocity/yaw update always lands at a valid state.
+        while (odom_it != measures_.odom_.end() &&
+               odom_it->timestamp_ <= imu->timestamp_) {
+            if (odom_it->timestamp_ >= ieskf_.GetNominalState().timestamp_) {
+                ieskf_.ObserveWheelSpeed(*odom_it);
+            }
+            ++odom_it;
+        }
+
         const Stated& s = imu_states_.back();
         imu_a_world_.push_back(s.R_ * (imu->acce_ - s.ba_) + g);
         imu_w_body_.push_back(imu->gyro_ - s.bg_);
         ieskf_.Predict(*imu);
         imu_states_.emplace_back(ieskf_.GetNominalState());
+    }
+
+    // At most one line per scan window (~10 Hz) so the gate is observable
+    // during slip tests without flooding the log.
+    const size_t gated = ieskf_.GetWheelGateRejects() - gate_rejects_before;
+    if (gated > 0) {
+        INCLIO_WARN("wheel-odom slip gate: rejected {} msg(s) this scan, last chi2 = {:.1f}",
+                    gated, ieskf_.GetLastWheelChi2());
     }
 }
 

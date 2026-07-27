@@ -31,7 +31,7 @@ struct IMUProcessorConfig {
     // Static initialization parameters (used only when use_static_init = true)
     double init_time_seconds = 5.0;
     int init_imu_queue_max_size = 2000;
-    int static_odom_pulse = 5;
+    double static_odom_speed = 0.05;   // |v_fwd|,|yaw_rate| below this => vehicle static [m/s, rad/s]
     double max_static_gyro_var = 0.5;
     double max_static_acce_var = 1.0;
     bool use_speed_for_static_checking = true;

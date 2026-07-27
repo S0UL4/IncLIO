@@ -4,12 +4,12 @@
 
 preprocess:
   lidar_type: 3             # 2 = Velodyne / generic PointCloud2
-  scan_line: 128
+  scan_line: 64
   time_scale: 1e6          # Velodyne per-point time field is in seconds×1000
   imu_coeff: 1.0
 
 mapping:
-  extrinsic_T: [ 0.002, 0.01, 0.04 ]
+  extrinsic_T: [0.006253, -0.011775, -0.028535]
   extrinsic_R: [ -1, 0, 0,
                 0, -1, 0,
                 0, 0, 1 ]
@@ -17,8 +17,8 @@ mapping:
 point_filter_num: 1
 max_iteration: 3
 max_static_acce_var: 0.2
-max_static_gyro_var: 0.5
-imu_init_time: 10.0
+max_static_gyro_var: 0.2
+imu_init_time: 3.0
 
 
 
@@ -36,3 +36,71 @@ prior_gravity: [0.0, 0.0, -9.81]
 
 # DLIO continuous-time motion correction (set false to use original slerp/lerp)
 use_ct_undistort: true
+
+# Wheel-odometry fusion (IESKF ObserveWheelSpeed). Tunables only — to ENABLE,
+# set the launch arg wheel_odom_topic:=<nav_msgs/Odometry topic> (empty = off).
+# r_imu_wheel is the IMU->axle offset in the IMU body frame [m] — MEASURE IT on
+# the robot; a wrong value injects a yaw-rate-dependent lateral bias.
+wheel_odom:
+  r_imu_wheel:   [-0.196, 0.012, -0.820]   # IMU -> wheel/axle origin, body frame [m]
+  vel_noise:     0.10                     # forward-speed std-dev [m/s]
+  nhc_noise:     0.01                     # lateral/vertical NHC std-dev [m/s] (keep tight)
+  yaw_noise:     0.10                     # yaw-rate std-dev [rad/s]
+  use_lever_arm: true                     # include lever-arm coupling into gyro bias
+  use_yaw_rate:  true                     # include the yaw-rate (gyro-z-bias) row
+  # Chi² slip/drift gate. Forward-speed is gated on its own 1-DOF NIS (a spinning
+  # drive wheel only corrupts forward speed → drop that row, KEEP the NHC rows);
+  # the NHC(+yaw) rows are gated together and a violation (skid) rejects the whole
+  # update. Lower thresholds = stricter. chi² 99%: 1-DOF=6.63, 3-DOF=11.34
+  # (set chi2_nhc=9.21 if use_yaw_rate is false → 2-DOF). Tune on a bag with slip.
+  use_slip_gate: true                     # enable the wheel-slip chi² gate
+  chi2_fwd:      6.63                      # forward-speed NIS gate (1-DOF)
+  chi2_nhc:      11.34                     # NHC(+yaw) Mahalanobis gate (3/2-DOF)
+
+
+frames:
+  world_frame:       "odom"           # parent of the published SLAM TF
+  base_frame:        "base_link"      # child of the published SLAM TF
+  imu_frame:         "ouster1/os1_imu"   # used for TF lookup (lidar->imu, base->imu)
+  lidar_frame:       "ouster1/os1_lidar"     # used for TF lookup of the lidar->imu extrinsic
+  use_tf_extrinsic:  true             # true: read lidar->imu extrinsic from TF instead of extrinsic_T/R
+  tf_lookup_timeout: 5.0              # seconds to wait for the static TFs on startup
+  publish_tf: true
+# # config/velodyne_ros2.yaml
+# # IncLIO config for Velodyne VLP-16 used via ROS2 live topics.
+# # Copy / adjust extrinsics for your sensor mount.
+
+# preprocess:
+#   lidar_type: 3             # 2 = Velodyne / generic PointCloud2
+#   scan_line: 128
+#   time_scale: 1e6          # Velodyne per-point time field is in seconds×1000
+#   imu_coeff: 1.0
+
+# mapping:
+#   extrinsic_T: [ 0.002, 0.01, 0.04 ]
+#   extrinsic_R: [ -1, 0, 0,
+#                 0, -1, 0,
+#                 0, 0, 1 ]
+
+# point_filter_num: 1
+# max_iteration: 3
+# max_static_acce_var: 0.2
+# max_static_gyro_var: 0.5
+# imu_init_time: 10.0
+
+
+
+# # Activating Pangolin viewer, buggy with ROS2 callback groups — disable for now
+# with_ui: false              # always false when running under ROS2
+
+# # Set use_static_init: false to skip static initialization and use prior biases.
+# # Useful when start system while already moving ( for better results , use the static initialization).
+# # prior_gravity must be set in body frame when use_static_init is false;
+# # [0, 0, -9.81] assumes a level-mounted IMU with z-down convention.
+# use_static_init: true
+# prior_bg: [-0.000252,  0.000481, -0.002086]
+# prior_ba: [ 0.000127, -0.000228, -0.012919]
+# prior_gravity: [0.0, 0.0, -9.81]
+
+# # DLIO continuous-time motion correction (set false to use original slerp/lerp)
+# use_ct_undistort: true

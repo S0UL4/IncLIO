@@ -32,6 +32,7 @@ bool IESKF<S>::Predict(const IMU& imu) {
 
     VecT acce = imu.acce_.template cast<S>();
     VecT gyro = imu.gyro_.template cast<S>();
+    last_gyro_ = gyro;   // cache body angular rate for the wheel-odom update
 
     VecT new_p = p_ + v_ * dt + 0.5 * (R_ * (acce - ba_)) * dt * dt + 0.5 * g_ * dt * dt;
     VecT new_v = v_ + R_ * (acce - ba_) * dt + g_ * dt;
@@ -105,6 +106,61 @@ bool IESKF<S>::UpdateUsingCustomObserve(IESKF::CustomObsFunc obs) {
     return true;
 }
 
+template <typename S>
+bool IESKF<S>::ObserveWheelSpeed(const Odom& odom) {
+    assert(odom.timestamp_ >= current_time_);
+
+    // --- 1. Predicted body-frame velocity at the wheel frame (with lever arm) ---
+    const Mat3T Rt = R_.matrix().transpose();    // Rᵀ
+    VecT v_body = Rt * v_;                        // Rᵀ·v   (IMU velocity in body frame)
+    VecT r_iw   = options_.r_imu_wheel_.template cast<S>();
+    VecT omega  = last_gyro_ - bg_;              // ω = gyro − bg   (needs last_gyro_)
+    if (options_.use_wheel_lever_arm_) {
+        v_body += omega.cross(r_iw);             // + ω × r_iw
+    }
+
+    // --- 2. Measurement z + residual r (4×1: v_fwd, NHC 0, NHC 0, yaw) ---
+    Eigen::Matrix<S, 4, 1> z, r;
+    z << static_cast<S>(odom.v_fwd_), S(0), S(0), static_cast<S>(odom.yaw_rate_);
+    r.template head<3>() = z.template head<3>() - v_body;
+    r(3) = z(3) - omega.z();                      // ω_z = (gyro − bg)_z
+
+    // --- 3. Jacobian H (4×18) ---
+    Eigen::Matrix<S, 4, 18> H = Eigen::Matrix<S, 4, 18>::Zero();
+    H.template block<3, 3>(0, 3) = Rt;                       // ∂/∂δv
+    H.template block<3, 3>(0, 6) = SO3::hat(v_body);         // ∂/∂δθ  (≈ hat(Rᵀv))
+    if (options_.use_wheel_lever_arm_) {
+        H.template block<3, 3>(0, 9) = SO3::hat(r_iw);       // ∂/∂δbg (lever arm)
+    }
+    H(3, 11) = S(-1);                                        // ∂ω_z/∂δbg_z
+
+    // Disable the yaw row cleanly (keeps the update fixed-size 4×18):
+    if (!options_.use_wheel_yaw_rate_) { H.row(3).setZero(); r(3) = S(0); }
+
+    // --- 4. Gain-form Kalman update (4×4 inverse) ---
+    Eigen::Matrix<S, 4, 4> Skk = H * cov_ * H.transpose() + odom_noise_;   // innovation cov
+    const Eigen::Matrix<S, 4, 4> Skk_inv = Skk.inverse();
+
+    // Slip gate: when the residual is wildly inconsistent with the filter
+    // (lifted robot / wheel slip), the measurement is a fault, not noise —
+    // reject it instead of averaging it in.
+    last_wheel_chi2_ = (r.transpose() * Skk_inv * r)(0, 0);
+    if (options_.odom_chi2_thresh_ > S(0) && last_wheel_chi2_ > options_.odom_chi2_thresh_) {
+        ++wheel_gate_rejects_;
+        return false;
+    }
+
+    Eigen::Matrix<S, 18, 4> K = cov_ * H.transpose() * Skk_inv;
+
+    dx_ = K * r;          // error-state correction
+    Update();             // inject dx_ into the nominal state (private helper)
+
+    // Joseph-free covariance update (single-step, fine for this near-linear obs)
+    cov_ = (Mat18T::Identity() - K * H) * cov_;
+
+    dx_.setZero();
+    return true;
+}
 
 
 // Explicit template instantiation

@@ -2,6 +2,7 @@
 #define INCLIO_MEASUREMENT_SYNC_HPP
 
 #include "inclio/imu.hpp"
+#include "inclio/odom.hpp"
 #include "utils/point_types.hpp"
 #include "utils/logger.hpp"
 
@@ -19,6 +20,7 @@ struct MeasureGroup {
     double lidar_end_time_ = 0;     // LiDAR packet end time
     FullCloudPtr lidar_ = nullptr;  // LiDAR point cloud
     std::deque<IMUPtr> imu_;        // IMU measurements between frames
+    std::deque<Odom> odom_;         // wheel-odom measurements between frames (sorted by time)
 };
 
 /// Synchronizes asynchronous IMU and LiDAR streams.
@@ -61,6 +63,18 @@ class MessageSync {
         imu_buffer_.emplace_back(imu);
     }
 
+    /// Buffer a wheel-odom measurement (thread-safe — called from the odom callback thread)
+    void ProcessOdom(const Odom& odom) {
+        std::lock_guard<std::mutex> lock(odom_buf_mutex_);
+        if (odom.timestamp_ < last_timestamp_odom_) {
+            INCLIO_WARN("Odom loop back, clearing buffer");
+            odom_buffer_.clear();
+        }
+
+        last_timestamp_odom_ = odom.timestamp_;
+        odom_buffer_.emplace_back(odom);
+    }
+
     /// Buffer a LiDAR scan (ROS-free interface)
     void ProcessCloud(FullCloudPtr cloud, double timestamp) {
         if (timestamp < last_timestamp_lidar_) {
@@ -92,6 +106,11 @@ class MessageSync {
     mutable std::mutex imu_buf_mutex_;
     std::deque<IMUPtr> imu_buffer_;
     double last_timestamp_imu_ = -1.0;
+
+    // Protected by odom_buf_mutex_: accessed from both the odom and lidar callback threads.
+    mutable std::mutex odom_buf_mutex_;
+    std::deque<Odom> odom_buffer_;
+    double last_timestamp_odom_ = -1.0;
 };
 
 } // namespace IncLIO

@@ -1,12 +1,12 @@
 """
-inclio_velodyne.launch.py
-Launch the IncLIO ROS2 node with a Velodyne (or any PointCloud2) LiDAR.
+inclio_hesai.launch.py
+Launch the IncLIO ROS2 node with a Hesai Pandar128.
 
 Usage:
-    ros2 launch inclio_ros2 inclio_velodyne.launch.py \\
-        config_file:=/path/to/velodyne_test.yaml \\
-        imu_topic:=/imu/data \\
-        lidar_topic:=/velodyne_points
+    ros2 launch inclio_ros2 inclio_hesai.launch.py \\
+        config_file:=/path/to/hesai128.yaml \\
+        imu_topic:=/sensor/sbg/imu/data \\
+        lidar_topic:=/astra_lidar/data_filtered
 """
 
 from launch import LaunchDescription
@@ -21,15 +21,15 @@ def generate_launch_description():
     args = [
         DeclareLaunchArgument("config_file",
                               default_value=PathJoinSubstitution(
-                                  [FindPackageShare("inclio_ros2"), "config", "velodyne32.yaml"]),
+                                  [FindPackageShare("inclio_ros2"), "config", "hesai128_sbg.yaml"]),
                               description="Path to IncLIO YAML config file"),
-        DeclareLaunchArgument("imu_topic",          default_value="/imu/data",
+        DeclareLaunchArgument("imu_topic",          default_value="/sensor/sbg/imu/data",
                               description="IMU topic"),
-        DeclareLaunchArgument("lidar_topic",        default_value="/velodyne_points",
+        DeclareLaunchArgument("lidar_topic",        default_value="/astra_lidar/data_filtered",
                               description="LiDAR PointCloud2 topic"),
         DeclareLaunchArgument("wheel_odom_topic",   default_value="",
                               description="Wheel-odometry nav_msgs/Odometry topic (empty = disabled)"),
-        DeclareLaunchArgument("map_voxel_size",     default_value="0.15",
+        DeclareLaunchArgument("map_voxel_size",     default_value="0.25",
                               description="Voxel leaf size applied to full_map_ at save time (m)"),
         DeclareLaunchArgument("body_crop_radius",   default_value="1.5",
                               description="Remove points closer than this to the sensor — strips vehicle body (m)"),
@@ -39,7 +39,7 @@ def generate_launch_description():
                               description="Publish rate of ~/cloud_world (Hz)"),
         DeclareLaunchArgument("world_frame",        default_value="world"),
         DeclareLaunchArgument("body_frame",         default_value="body"),
-        DeclareLaunchArgument("publish_tf",         default_value="false"),
+        DeclareLaunchArgument("publish_tf",         default_value="true"),
         DeclareLaunchArgument("publish_path",       default_value="true"),
         DeclareLaunchArgument("publish_cloud",      default_value="true"),
     ]
@@ -48,7 +48,7 @@ def generate_launch_description():
     node = Node(
         package="inclio_ros2",
         executable="inclio_ros2_node",
-        name="inclio",
+        name="inclio_sbg",
         output="screen",
         parameters=[{
             "config_file":        LaunchConfiguration("config_file"),

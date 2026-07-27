@@ -6,9 +6,7 @@
 
 namespace IncLIO {
 
-bool NdtRegistration::AlignNdt(SE3& init_pose,
-                               double* mean_res_out,
-                               int*    eff_num_out) {
+bool NdtRegistration::AlignNdt(SE3& init_pose) {
     assert(ndt_map_ != nullptr && ndt_map_->NumVoxels() > 0);
     assert(source_ != nullptr);
 
@@ -24,10 +22,6 @@ bool NdtRegistration::AlignNdt(SE3& init_pose,
     std::iota(index.begin(), index.end(), 0);
 
     int total_size = static_cast<int>(index.size()) * num_residual_per_point;
-
-    // Last iteration's stats — surfaced to caller via optional out-params.
-    double last_mean_res = std::numeric_limits<double>::infinity();
-    int    last_eff_num  = 0;
 
     for (int iter = 0; iter < options_.max_iteration; ++iter) {
         std::vector<bool> effect_pts(total_size, false);
@@ -104,15 +98,8 @@ bool NdtRegistration::AlignNdt(SE3& init_pose,
         Mat6d H = acc.H;
         Vec6d err = acc.err;
 
-        last_eff_num  = effective_num;
-        last_mean_res = effective_num > 0
-                            ? total_res / effective_num
-                            : std::numeric_limits<double>::infinity();
-
         if (effective_num < options_.min_effective_pts) {
             INCLIO_WARN("effective num too small: {}", effective_num);
-            if (mean_res_out) *mean_res_out = last_mean_res;
-            if (eff_num_out)  *eff_num_out  = last_eff_num;
             init_pose = pose;
             return false;
         }
@@ -122,7 +109,7 @@ bool NdtRegistration::AlignNdt(SE3& init_pose,
         pose.translation() += dx.tail<3>();
 
         INCLIO_INFO("iter {} total res: {:.4f}, eff: {}, mean res: {:.4f}, dx norm: {:.6f}",
-                    iter, total_res, effective_num, last_mean_res, dx.norm());
+                    iter, total_res, effective_num, total_res / effective_num, dx.norm());
 
         if (dx.norm() < options_.eps) {
             INCLIO_INFO("converged, dx norm = {:.6f}", dx.norm());
@@ -130,8 +117,6 @@ bool NdtRegistration::AlignNdt(SE3& init_pose,
         }
     }
 
-    if (mean_res_out) *mean_res_out = last_mean_res;
-    if (eff_num_out)  *eff_num_out  = last_eff_num;
     init_pose = pose;
     return true;
 }

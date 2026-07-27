@@ -20,7 +20,7 @@ with_ui: false
 
 max_static_acce_var: 0.05
 max_static_gyro_var: 0.01
-imu_init_time: 13.0
+imu_init_time: 7.0
 
 # Set use_static_init: false to skip static initialization and use prior biases.
 # Useful when start system while already moving ( for better results , use the static initialization).

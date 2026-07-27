@@ -40,7 +40,6 @@
 #include "ros2_wrapper/imu_convert.hpp"
 
 #include "inclio/inclio.hpp"
-#include "inclio/loop_closure.hpp"
 
 #include <pcl/filters/voxel_grid.h>
 #include <pcl/filters/crop_box.h>
@@ -53,7 +52,6 @@
 #include <nav_msgs/msg/odometry.hpp>
 #include <nav_msgs/msg/path.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
-#include <visualization_msgs/msg/marker_array.hpp>
 
 #ifdef HAVE_LIVOX_ROS_DRIVER2
 #include <livox_ros_driver2/msg/custom_msg.hpp>
@@ -67,7 +65,11 @@
 #include <thread>
 #include <condition_variable>
 #include <unordered_map>
-#include <map>
+#include <string>
+
+// TF listener libraries (for reading lidar->imu extrinsic from TF if configured)
+#include <tf2_ros/buffer.h>
+#include <tf2_ros/transform_listener.h>
 
 
 using namespace std::chrono_literals;
@@ -89,6 +91,7 @@ private:
     // ── Callbacks ─────────────────────────────────────────────────────────────
     void ImuCallback(sensor_msgs::msg::Imu::UniquePtr msg);
     void CloudCallback(sensor_msgs::msg::PointCloud2::UniquePtr msg);
+    void OdomCallback(nav_msgs::msg::Odometry::UniquePtr msg);
     void ui_callback();
 
     // ── Viz worker (downsample + crop + publish, outside executor pool) ─────
@@ -129,6 +132,7 @@ private:
     // ── ROS2 I/O ──────────────────────────────────────────────────────────────
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr         imu_sub_;
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_sub_;
+    rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr       wheel_odom_sub_;
     rclcpp::TimerBase::SharedPtr timer_;
 
 
@@ -140,7 +144,6 @@ private:
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr   odom_fast_pub_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr       path_pub_;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_world_pub_;
-    rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr loop_marker_pub_;
 
     std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr save_map_srv_;
@@ -152,7 +155,6 @@ private:
     std::string config_file_;
     std::string world_frame_;
     std::string body_frame_;
-    bool publish_tf_    = true;
     bool publish_path_  = true;
     bool publish_cloud_ = true;
 
@@ -199,81 +201,31 @@ private:
     bool                    viz_worker_stop_ = false;
     IncLIO::SE3             viz_crop_center_;  // crop centre passed to the worker
 
-    // CloudConvertConfig
+    // CloudConvertConfig 
     CloudConvertConfig cc;
 
-    // ── Loop closure (Phase A: detection only) ──────────────────────────────
-    // Disabled by default. Lidar thread captures a Keyframe per IsKeyframe()
-    // event and pushes it to keyframe_queue_. The loop_worker_ thread drains
-    // the queue, builds descriptors, appends to keyframe_db_, and runs a
-    // throttled top-K candidate search.
-    bool   loop_closure_enabled_   = false;
-    double lc_pc_max_radius_       = 80.0;
-    double lc_lidar_height_        = 1.73;
-    double lc_pc_max_z_            = 6.0;
-    int    lc_min_keyframe_gap_    = 30;
-    double lc_sc_dist_thres_       = 0.7;
-    double lc_max_spatial_dist_    = 30.0;
-    double lc_search_frequency_hz_ = 1.0;
-    int    lc_kf_search_num_       = 25;   // NDTMC-LIO-SAM default submap size
-    int    lc_verify_max_iter_     = 25;
-    int    lc_verify_min_eff_pts_  = 200;
-    double lc_verify_mean_res_thres_ = 1.0;
-    int    next_keyframe_id_       = 0;
-    IncLIO::KeyframeVoxelizerConfig kf_voxelizer_cfg_;
 
-    /// One verified loop measurement (Phase A output, Phase B graph input).
-    struct LoopFactor {
-        int          cur_id    = -1;
-        int          pre_id    = -1;
-        IncLIO::SE3  T_pre_cur;            // cur expressed in pre's LiDAR frame
-        double       mean_res  = 0.0;
-        int          eff_num   = 0;
-        double       shift_t   = 0.0;      // ||t_NDT - t_odom||  (m)
-        double       shift_deg = 0.0;      // ||R_NDT R_odomᵀ|| as angle (deg)
-    };
-    std::vector<LoopFactor>      verified_loops_;
-    std::mutex                   verified_loops_mutex_;
-    std::multimap<int, int>      closed_pairs_;       // cur_id -> pre_id (already verified)
-    std::mutex                   closed_pairs_mutex_;
+    // to project odom in base_link
+    std::string world_frame_id = "camera_init";
+    std::string base_frame_id  = "body";
+    std::string imu_frame_id   = "body";
+    std::string lidar_frame_id = "lidar";
+    bool publish_tf_ = true;
+    bool use_tf_extrinsic = false;
+    double tf_lookup_timeout = 5.0;
 
-    // Lidar thread → loop thread
-    std::deque<IncLIO::KeyframePtr> keyframe_queue_;
-    std::mutex                      keyframe_queue_mutex_;
+    IncLIO::Vec3d t_imu_base{IncLIO::Zero3d};
+    IncLIO::Mat3d R_imu_base{IncLIO::Eye3d};
+    IncLIO::Vec3d Lidar_T_wrt_IMU{IncLIO::Zero3d};
+    IncLIO::Mat3d Lidar_R_wrt_IMU{IncLIO::Eye3d};
 
-    // Owned by loop thread; protected for future readers (Steps 6/7/8)
-    std::vector<IncLIO::KeyframePtr> keyframe_db_;
-    std::vector<Eigen::MatrixXd>     keyframe_descriptors_;  // side-cache, same index
-    std::mutex                       keyframe_db_mutex_;
+    // Re-anchor the published odom frame to base_link's first pose so base_link
+    // starts at the origin. T_base0_world_ = (first T_world_base)^-1, captured once.
+    IncLIO::SE3 T_base0_world_;
+    bool        have_base_origin_ = false;
 
-    // Loop worker thread
-    std::thread             loop_worker_;
-    std::mutex              loop_cv_mutex_;
-    std::condition_variable loop_cv_;
-    bool                    loop_worker_stop_ = false;
-    IncLIO::NdtDescriptor   descriptor_builder_;
-
-    struct LoopCandidateViz {
-        IncLIO::SE3 pose;
-        int    id;
-        double dist;     // descriptor distance
-        int    shift;
-        bool   verified  = false;
-        double mean_res  = 0.0;
-        int    eff_num   = 0;
-        double shift_t   = 0.0;
-        double shift_deg = 0.0;
-    };
-    void LoopWorkerLoop();
-    void DetectLoopClosure();
-    bool VerifyLoopCandidate(int cur_id, int cand_id,
-                             IncLIO::SE3& T_pre_cur_out,
-                             double& mean_res_out,
-                             int& eff_num_out,
-                             double& shift_t_out,
-                             double& shift_deg_out);
-    void PublishLoopMarkers(const IncLIO::SE3& cur_pose, int cur_id,
-                            const std::vector<LoopCandidateViz>& candidates);
+    std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
+    std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
 };
 
 } // namespace inclio_ros2

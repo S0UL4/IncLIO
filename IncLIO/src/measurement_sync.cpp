@@ -29,6 +29,19 @@ bool MessageSync::Sync() {
         }
     }
 
+    // Drain wheel-odom samples covering this scan window (opportunistic: odom may be
+    // absent or run at a different rate, so it never gates the sync like IMU does).
+    {
+        std::lock_guard<std::mutex> lock(odom_buf_mutex_);
+        measures_.odom_.clear();
+        while (!odom_buffer_.empty()) {
+            double odom_time = odom_buffer_.front().timestamp_;
+            if (odom_time > lidar_end_time_) break;
+            measures_.odom_.push_back(odom_buffer_.front());
+            odom_buffer_.pop_front();
+        }
+    }
+
     lidar_buffer_.pop_front();
     time_buffer_.pop_front();
     lidar_pushed_ = false;

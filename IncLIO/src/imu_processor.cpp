@@ -1,4 +1,5 @@
 #include "inclio/imu_processor.hpp"
+#include <cmath>
 #include <sstream>
 
 namespace IncLIO {
@@ -46,7 +47,8 @@ bool IMUProcessor::AddOdomForInit(const Odom& odom) {
         return true;
     }
 
-    if (odom.left_pulse_ < config_.static_odom_pulse && odom.right_pulse_ < config_.static_odom_pulse) {
+    if (std::abs(odom.v_fwd_) < config_.static_odom_speed &&
+        std::abs(odom.yaw_rate_) < config_.static_odom_speed) {
         is_static_ = true;
     } else {
         is_static_ = false;

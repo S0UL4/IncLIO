@@ -121,4 +121,4 @@ endif()
 # ─────────────────────────────────────────────
 # Build the player as it is currently under tools/
 # ─────────────────────────────────────────────
-add_subdirectory(tools)
+#add_subdirectory(tools)

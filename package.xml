@@ -21,13 +21,12 @@
   <depend>geometry_msgs</depend>
   <depend>std_msgs</depend>
   <depend>std_srvs</depend>
-  <depend>visualization_msgs</depend>
 
   <!-- PCL bridge -->
   <depend>pcl_conversions</depend>
 
   <!-- Optional: Livox custom message (comment out if not using Livox) -->
-  <!-- <depend>livox_ros_driver2</depend> -->
+  <depend>livox_ros_driver2</depend>
 
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>

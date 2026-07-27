@@ -9,15 +9,15 @@ preprocess:
   imu_coeff: 1.0
 
 mapping:
-  extrinsic_T: [ -0.488, 0.0, 0.385 ]
+  extrinsic_T: [ 0.002, 0.0, 0.480 ]
   extrinsic_R: [ 0, -1, 0,
-                1,            0, 0,
+                1,  0, 0,
                 0, 0, 1 ]
 
-point_filter_num: 10
+point_filter_num: 1
 max_iteration: 3
-max_static_acce_var: 0.2
-max_static_gyro_var: 0.5
+max_static_acce_var: 0.02
+max_static_gyro_var: 0.05
 imu_init_time: 10.0
 
 
@@ -36,3 +36,26 @@ prior_gravity: [0.0, 0.0, -9.81]
 
 # DLIO continuous-time motion correction (set false to use original slerp/lerp)
 use_ct_undistort: true
+
+# Wheel-odometry fusion (IESKF ObserveWheelSpeed). Tunables only — to ENABLE,
+# set the launch arg wheel_odom_topic:=<nav_msgs/Odometry topic> (empty = off).
+# r_imu_wheel is the IMU->axle offset in the IMU body frame [m] — MEASURE IT on
+# the robot; a wrong value injects a yaw-rate-dependent lateral bias.
+wheel_odom:
+  r_imu_wheel:   [-0.020, 0.0, 0.710]   # IMU -> wheel/axle origin, body frame [m]
+  vel_noise:     0.10                     # forward-speed std-dev [m/s]
+  nhc_noise:     0.01                     # lateral/vertical NHC std-dev [m/s] (keep tight)
+  yaw_noise:     0.10                     # yaw-rate std-dev [rad/s]
+  use_lever_arm: true                     # include lever-arm coupling into gyro bias
+  use_yaw_rate:  true                     # include the yaw-rate (gyro-z-bias) row
+  chi2_thresh:   50.28                    # slip gate: reject obs with chi2 > this (4-DOF 99%); <= 0 disables
+
+
+frames:
+  world_frame:       "odom"           # parent of the published SLAM TF
+  base_frame:        "base_link"      # child of the published SLAM TF
+  imu_frame:         "atlans_imu_link"   # used for TF lookup (lidar->imu, base->imu)
+  lidar_frame:       "lidar_link"     # used for TF lookup of the lidar->imu extrinsic
+  use_tf_extrinsic:  true             # true: read lidar->imu extrinsic from TF instead of extrinsic_T/R
+  tf_lookup_timeout: 5.0              # seconds to wait for the static TFs on startup
+  publish_tf: false
