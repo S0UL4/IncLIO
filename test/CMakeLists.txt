@@ -13,6 +13,13 @@ target_link_libraries(benchmark_undistort
     inclio                 # includes ct_undistort + lio; propagates inclio_common
 )
 
-install(TARGETS benchmark_ndt benchmark_undistort
+# Wheel-odometry IESKF unit test (ObserveWheelSpeed)
+add_executable(test_wheel_odom test_wheel_odom.cpp)
+
+target_link_libraries(test_wheel_odom
+    inclio_common          # IESKF::ObserveWheelSpeed lives in inclio_common
+)
+
+install(TARGETS benchmark_ndt benchmark_undistort test_wheel_odom
     DESTINATION lib/${PROJECT_NAME}
 )

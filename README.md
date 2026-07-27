@@ -105,14 +105,13 @@ ros2 service call /inclio_ros2_node/save_map std_srvs/srv/Trigger
 |-------|------|-------------|
 | `~/imu` | `sensor_msgs/Imu` | IMU measurements |
 | `~/points` | `sensor_msgs/PointCloud2` or `livox_ros_driver2/CustomMsg` | LiDAR point cloud |
-
+| `~/wheel_odom_topic` | `nav_msgs/Odometry` | Wheel odometry (optional) |
 
 ### Publications
 
 | Topic | Type | Rate | Description |
 |-------|------|------|-------------|
 | `~/odometry` | `nav_msgs/Odometry` | Scan rate (~10-20 Hz) | NDT-corrected pose |
-| `~/odometry_fast` | `nav_msgs/Odometry` | IMU rate (~100-200 Hz) | IMU-propagated pose |
 | `~/path` | `nav_msgs/Path` | Scan rate | Trajectory history |
 | `~/cloud_world` | `sensor_msgs/PointCloud2` | `publish_rate_hz` (default 5 Hz) | Sliding-window local map, voxel-downsampled and radius-cropped, in world frame |
 

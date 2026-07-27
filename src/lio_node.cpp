@@ -402,7 +402,6 @@ void LioNode::CreatePublishers() {
     tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
 
     odom_pub_  = create_publisher<nav_msgs::msg::Odometry>("~/odometry", 10);
-    odom_fast_pub_ = create_publisher<nav_msgs::msg::Odometry>("~/odometry_fast", 50);
     path_pub_  = create_publisher<nav_msgs::msg::Path>("~/path", 10);
 
     if (publish_cloud_) {
