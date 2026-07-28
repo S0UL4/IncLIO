@@ -16,6 +16,8 @@
 
 #include <pcl/io/pcd_io.h>
 #include <chrono>
+#include <cstdio>
+#include <unistd.h>   
 
 namespace inclio_ros2 {
 
@@ -32,9 +34,6 @@ LioNode::LioNode(const rclcpp::NodeOptions& options)
         throw std::runtime_error("IncLIO init failed");
     }
 
-    // Callback groups: two MutuallyExclusive groups so that IMU and LiDAR
-    // callbacks can run in parallel on a MultiThreadedExecutor, while each
-    // stream remains internally sequential.
     imu_cb_group_   = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
     lidar_cb_group_ = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
     timer_group_  = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
@@ -47,6 +46,8 @@ LioNode::LioNode(const rclcpp::NodeOptions& options)
     viz_worker_ = std::thread(&LioNode::VizWorkerLoop, this);
 
     RCLCPP_INFO(get_logger(), "IncLIO ROS2 node ready (multi-threaded)");
+    pcl::console::setVerbosityLevel(pcl::console::L_ERROR);
+
 }
 
 
@@ -62,6 +63,12 @@ LioNode::~LioNode() {
     if (lio_) {
         lio_->Finish();
     }
+
+    // Close the progress terminal handle (unless it aliases stderr).
+    if (progress_tty_ && progress_tty_ != stderr) {
+        std::fclose(progress_tty_);
+        progress_tty_ = nullptr;
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -76,12 +83,6 @@ void LioNode::DeclareParameters() {
     declare_parameter<std::string>("imu_topic",   "imu");
     declare_parameter<std::string>("lidar_topic", "points");
     declare_parameter<std::string>("wheel_odom_topic", "");   // empty => wheel odom disabled
-
-    // // Point cloud conversion (mirrors run_bag.cc CLI / YAML options)
-    // declare_parameter<int>   ("lidar_type",        4);     // 1=Livox, 2=Velodyne, 3=Ouster
-    // declare_parameter<int>   ("num_scans",         128);
-    // declare_parameter<double>("time_scale",        1e-3);
-    // declare_parameter<int>   ("point_filter_num",  1);
 
     // Frame ids
     declare_parameter<std::string>("world_frame", "world");
@@ -143,8 +144,8 @@ bool LioNode::InitLIO() {
     // Print parameters for verification
     std::string lidar_type_str_;
     lidar_type_str_ = (cc.lidar_type == LidarType::LIVOX) ? "LIVOX" :
-                      (cc.lidar_type == LidarType::VELO32) ? "VELO32" :
-                      (cc.lidar_type == LidarType::OUST64) ? "OUST64" :
+                      (cc.lidar_type == LidarType::VELO) ? "VELODYNE" :
+                      (cc.lidar_type == LidarType::OUST) ? "OUSTER" :
                       (cc.lidar_type == LidarType::HESAI) ? "HESAI" : "UNKNOWN";
     RCLCPP_INFO(get_logger(), "Config parameters:");
     RCLCPP_INFO(get_logger(), "  lidar_type: %s", lidar_type_str_.c_str());
@@ -294,7 +295,7 @@ bool LioNode::InitLIO() {
     }
 
 
-    if (base_frame_id != imu_frame_id)
+    if ((base_frame_id != imu_frame_id) && use_tf_extrinsic)
     {
         try {
             auto tf = tf_buffer_->lookupTransform(imu_frame_id, base_frame_id, tf2::TimePointZero, tf_timeout);
@@ -431,49 +432,9 @@ void LioNode::ImuCallback(sensor_msgs::msg::Imu::UniquePtr msg) {
 
     if (lio_ && lio_->IsInitialized()) {
         // After init: feed IMU directly into LIO (for MessageSync + high-rate
-        // propagation), then publish the propagated pose at IMU rate.
+        // propagation)
         lio_->AddIMU(imu_out);
 
-        // auto state = lio_->GetPropagatedState();
-        // auto pose = state.GetSE3();
-
-        // nav_msgs::msg::Odometry odom;
-        // odom.header.stamp    = msg->header.stamp;
-        // odom.header.frame_id = world_frame_;
-        // odom.child_frame_id  = body_frame_;
-
-        // const auto& t = pose.translation();
-        // const auto  q = pose.unit_quaternion();
-        // odom.pose.pose.position.x    = t.x();
-        // odom.pose.pose.position.y    = t.y();
-        // odom.pose.pose.position.z    = t.z();
-        // odom.pose.pose.orientation.x = q.x();
-        // odom.pose.pose.orientation.y = q.y();
-        // odom.pose.pose.orientation.z = q.z();
-        // odom.pose.pose.orientation.w = q.w();
-
-        // IncLIO::Vec3d v_body = pose.so3().inverse() * state.v_;
-        // odom.twist.twist.linear.x = v_body.x();
-        // odom.twist.twist.linear.y = v_body.y();
-        // odom.twist.twist.linear.z = v_body.z();
-
-        // odom_fast_pub_->publish(odom);
-
-        // // TF at IMU rate — smooth transform for RViz and downstream nodes
-        // if (publish_tf_) {
-        //     geometry_msgs::msg::TransformStamped tf_msg;
-        //     tf_msg.header.stamp    = msg->header.stamp;
-        //     tf_msg.header.frame_id = world_frame_;
-        //     tf_msg.child_frame_id  = body_frame_;
-        //     tf_msg.transform.translation.x = t.x();
-        //     tf_msg.transform.translation.y = t.y();
-        //     tf_msg.transform.translation.z = t.z();
-        //     tf_msg.transform.rotation.x    = q.x();
-        //     tf_msg.transform.rotation.y    = q.y();
-        //     tf_msg.transform.rotation.z    = q.z();
-        //     tf_msg.transform.rotation.w    = q.w();
-        //     tf_broadcaster_->sendTransform(tf_msg);
-        // }
     } else {
         // Before init: buffer only — ProcessCloud drains these into LIO
         std::lock_guard<std::mutex> lock(imu_buf_mutex_);
@@ -492,7 +453,7 @@ void LioNode::OdomCallback(nav_msgs::msg::Odometry::UniquePtr msg) {
 
     const double ts = msg->header.stamp.sec + msg->header.stamp.nanosec * 1e-9;
     // twist is expressed in child_frame_id (base_link): forward speed + yaw rate
-    // are taken directly, no pulse/wheel-radius conversion needed.
+    // are taken directly
     IncLIO::Odom odom(ts, msg->twist.twist.linear.x, msg->twist.twist.angular.z);
     lio_->AddOdom(odom);
 }
@@ -539,7 +500,22 @@ void LioNode::LivoxCallback(const livox_ros_driver2::msg::CustomMsg::SharedPtr m
 #endif
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ProcessCloud  (runs on lidar_cb_group_ — heavy work happens here)
+// ProgressTTY  (controlling terminal for the in-place init progress bar)
+// ─────────────────────────────────────────────────────────────────────────────
+// Opened lazily and cached. Prefers /dev/tty (the controlling terminal) so the
+// bar bypasses `ros2 launch`'s stdout/stderr pipe; falls back to stderr if it is
+// itself a terminal; returns nullptr when there is no terminal (headless).
+FILE* LioNode::ProgressTTY() {
+    if (!progress_tty_attempted_) {
+        progress_tty_attempted_ = true;
+        progress_tty_ = std::fopen("/dev/tty", "w");
+        if (!progress_tty_ && isatty(fileno(stderr))) progress_tty_ = stderr;
+    }
+    return progress_tty_;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ProcessCloud  (runs on lidar_cb_group_ )
 // ─────────────────────────────────────────────────────────────────────────────
 void LioNode::ProcessCloud(IncLIO::FullCloudPtr cloud, double ts,
                             const rclcpp::Time& stamp)
@@ -561,24 +537,49 @@ void LioNode::ProcessCloud(IncLIO::FullCloudPtr cloud, double ts,
     // Feed the cloud — triggers the full LIO pipeline
     lio_->AddCloud(cloud, ts);
 
-    if (!lio_->IsInitialized()) return;
+    if (!lio_->IsInitialized()) {
+        // Show a "loading" indicator so the user knows to keep the sensor still.
+        const double p = lio_->GetInitProgress();          // 0..1
+        const int    filled = static_cast<int>(p * 20.0 + 0.5);
+        std::string  bar(filled, '#');
+        bar.append(20 - filled, '.');
+
+        if (FILE* tty = ProgressTTY()) {
+            // Refresh the same line with a carriage return and no newline, so each
+            // update overwrites the previous bar. Writing to the controlling terminal
+            // (/dev/tty) rather than stderr means this survives `ros2 launch`, which
+            // otherwise captures stderr through a pipe and re-prints it line by line.
+            fprintf(tty,
+                    "\r[IncLIO] Initializing IMU — keep the sensor still  [%s] %3.0f%%",
+                    bar.c_str(), p * 100.0);
+            fflush(tty);
+            init_bar_shown_ = true;
+        } else {
+            // No terminal at all (headless / systemd): fall back to throttled log lines.
+            RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 400,
+                "Initializing IMU — keep the sensor still  [%s] %3.0f%%",
+                bar.c_str(), p * 100.0);
+        }
+        return;
+    }
+
+    // Announce the transition to tracking exactly once.
+    if (!init_announced_) {
+        init_announced_ = true;
+        if (init_bar_shown_) {
+            if (FILE* tty = ProgressTTY()) { fputc('\n', tty); fflush(tty); }  // close the bar line
+        }
+        RCLCPP_INFO(get_logger(), "IncLIO initialized — tracking started");
+    }
 
     auto pose  = lio_->GetCurrentPose();
     auto state = lio_->GetCurrentState();
 
     ////////////////////// Publish base_link pose in the world frame //////////////////////
-    // T_world_base = T_world_imu * T_imu_base
-    // Tracking base_link (not the IMU) removes the lever-arm arc on in-place turns.
-    // IncLIO::Mat3d R_world_base = pose.rotationMatrix() * R_imu_base;
-    // IncLIO::Vec3d t_world_base = pose.rotationMatrix() * t_imu_base + pose.translation();
-
     Sophus::SE3 T_world_imu(pose.rotationMatrix(), pose.translation());
     Sophus::SE3 T_imu_base(R_imu_base, t_imu_base);
 
     Sophus::SE3 T_base_imu = T_imu_base.inverse();
-
-    // Sophus::SE3 T_world_base = T_world_imu * T_imu_base;
-
 
     // At t=0, save the initial base pose once
     static Sophus::SE3d T_world_base_init;
@@ -591,30 +592,7 @@ void LioNode::ProcessCloud(IncLIO::FullCloudPtr cloud, double ts,
         initialized = true;
     }
 
-    // Every frame
-    // Sophus::SE3d T_world_imu(pose.rotationMatrix(), pose.translation());
-    
-    // Re-anchor: express pose relative to initial base pose
     Sophus::SE3d T_base0_base = T_world_base_init.inverse() * T_world_base;
-
-
-    // IncLIO::Mat3d R_imu_init_imu = pose.rotationMatrix();
-
-    // // imu_init_T_base = imu_init_T_imu * imu_T_base
-    // IncLIO::Mat3d R_imu_init_base = R_imu_init_imu * R_imu_base;
-    // IncLIO::Vec3d t_imu_init_base = R_imu_init_imu * t_imu_base + pose.translation();
-
-    // // base_T_imu = inv(imu_T_base)
-    // IncLIO::Mat3d R_base_imu = R_imu_base.transpose();
-    // IncLIO::Vec3d t_base_imu = -R_base_imu * t_imu_base;
-
-    // // published_T_base = base_T_imu * imu_init_T_base
-    // IncLIO::Mat3d R_pub = R_base_imu * R_imu_init_base;
-    // IncLIO::Vec3d t_pub = R_base_imu * t_imu_init_base + t_base_imu;
-
-    // pose.so3() = IncLIO::SO3(R_world_base);
-    // pose.translation() = t_world_base;
-
     Sophus::SE3d T_base0_imu = T_world_base_init.inverse() * T_world_imu;
 
     PublishOdometry(stamp, T_base0_base, state);
@@ -719,7 +697,6 @@ void LioNode::PublishTF(const rclcpp::Time& stamp, const IncLIO::SE3& pose) {
 // Fast path: drain scan_queue_, transform to world frame, voxel filter each scan
 // individually (small extent per scan → never overflows PCL int32), then accumulate
 // into full_map_ and push into the viz sliding window.
-// Following DLIO's pattern: filter-per-scan, not filter-the-whole-map.
 void LioNode::ui_callback() {
     std::deque<ScanEntry> pending;
     {

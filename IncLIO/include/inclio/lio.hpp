@@ -41,9 +41,6 @@ struct Vec3iHashCompare {
 
 using VoxelHashMap = tbb::concurrent_hash_map<Vec3i, VoxelAccum, Vec3iHashCompare>;
 
-// Forward declaration for optional UI
-namespace ui { class PangolinWindow; }
-
 /// Main LIO odometry pipeline
 ///
 /// Data flow per scan:
@@ -93,9 +90,6 @@ struct LIOConfig {
     // IMU-LiDAR extrinsics
     SE3 T_imu_lidar;  // Transform from LiDAR frame to IMU frame
 
-    // UI
-    bool with_ui = false;
-
     // Use DLIO continuous-time motion correction in Undistort().
     // When false, falls back to the original slerp/lerp PoseInterp.
     bool use_ct_undistort = true;
@@ -143,10 +137,14 @@ class LIO {
     /// Whether IMU initialization is done
     bool IsInitialized() const { return !imu_need_init_; }
 
+    /// Initialization progress in [0, 1] while IsInitialized() is still false —
+    /// for a user-facing "loading" indicator during static IMU init.
+    double GetInitProgress() const { return imu_processor_.GetInitProgress(); }
+
     /// True if the last processed scan was added to the NDT map (keyframe condition met).
     bool WasKeyframe() const { return last_was_keyframe_; }
 
-    /// Shut down (clean up UI if active)
+    /// Shut down and log final stats
     void Finish();
 
     // is Keyframe or not ?
@@ -209,9 +207,6 @@ class LIO {
     Stated prop_state_;
     Vec3d prop_gravity_{0, 0, -9.81};
 
-    // Optional UI
-    std::shared_ptr<ui::PangolinWindow> ui_ = nullptr;
-    
 };
 
 } // namespace IncLIO

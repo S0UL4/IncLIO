@@ -32,7 +32,7 @@ bool IMUProcessor::AddIMUForInit(const IMU& imu) {
 
     double init_time = imu.timestamp_ - init_start_time_;
     if (init_time > config_.init_time_seconds) {
-        TryInit();
+       TryInit();
     }
 
     while (static_cast<int>(init_imu_deque_.size()) > config_.init_imu_queue_max_size) {

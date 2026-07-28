@@ -32,10 +32,10 @@ namespace inclio_ros2 {
 
 
 enum class LidarType {
-    LIVOX = 1,  // Lviox CustomMSG ( not tested yet)
-    VELO32,    // Velodyne 32 or 16 ? ( not tested yet)
-    OUST64,    // ouster 64 (not tested yet)
-    HESAI,     // Hesai Pandar128 (tested)
+    LIVOX = 1,  // Lviox CustomMSG 
+    VELO,    // Velodyne 
+    OUST,    // ouster 
+    HESAI,     // Hesai Pandar128 
 };
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -23,13 +23,13 @@ def generate_launch_description():
                               default_value=PathJoinSubstitution(
                                   [FindPackageShare("inclio_ros2"), "config", "hesai128_sbg.yaml"]),
                               description="Path to IncLIO YAML config file"),
-        DeclareLaunchArgument("imu_topic",          default_value="/sensor/sbg/imu/data",
+        DeclareLaunchArgument("imu_topic",          default_value="/alphasense_driver_ros/imu",
                               description="IMU topic"),
-        DeclareLaunchArgument("lidar_topic",        default_value="/astra_lidar/data_filtered",
+        DeclareLaunchArgument("lidar_topic",        default_value="/hesai/pandar",
                               description="LiDAR PointCloud2 topic"),
         DeclareLaunchArgument("wheel_odom_topic",   default_value="",
                               description="Wheel-odometry nav_msgs/Odometry topic (empty = disabled)"),
-        DeclareLaunchArgument("map_voxel_size",     default_value="0.25",
+        DeclareLaunchArgument("map_voxel_size",     default_value="0.01",
                               description="Voxel leaf size applied to full_map_ at save time (m)"),
         DeclareLaunchArgument("body_crop_radius",   default_value="1.5",
                               description="Remove points closer than this to the sensor — strips vehicle body (m)"),
@@ -48,7 +48,7 @@ def generate_launch_description():
     node = Node(
         package="inclio_ros2",
         executable="inclio_ros2_node",
-        name="inclio_sbg",
+        name="inclio",
         output="screen",
         parameters=[{
             "config_file":        LaunchConfiguration("config_file"),

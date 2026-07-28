@@ -1,6 +1,6 @@
-# IncLIO — Incremental LiDAR-Inertial Odometry
+# IncLIO — Incremental LiDAR-Inertial-Wheel Odometry
 
-A real-time LiDAR-Inertial Odometry system built on an **Iterated Error-State Kalman Filter (IESKF)** with **Normal Distribution Transform (NDT)** scan-to-map registration. Designed for high-rate, low-latency pose estimation on robotic platforms.
+A real-time **tightly-coupled LiDAR-Inertial-Wheel Odometry** system built on an **Iterated Error-State Kalman Filter (IESKF)** with **Normal Distribution Transform (NDT)** scan-to-map registration. Wheel odometry is fused as a direct IESKF observation (not a loose pose prior) and is optional — the system runs as a pure LiDAR-Inertial (LIO) pipeline when no wheel source is available. Designed for high-rate, low-latency pose estimation on robotic platforms.
 
 <p align="center">
   <img src="doc/demo.gif" alt="IncLIO demo" width="800"/>
@@ -12,6 +12,7 @@ A real-time LiDAR-Inertial Odometry system built on an **Iterated Error-State Ka
 - **IESKF** with iterated NDT observation model for accurate pose correction
 - **IMU forward propagation** between LiDAR scans for high-rate odometry (100+ Hz), anchored by the corrected state after each NDT alignment
 - **Continuous-time motion-compensated undistortion** — DLIO constant-jerk / angular-acceleration analytical model (eq. 5, Chen et al. 2023) corrects each point to scan-end time; falls back to slerp/lerp via `use_ct_undistort: false`
+- **Tightly-coupled wheel odometry** (optional) — `nav_msgs/Odometry` forward speed + yaw rate fused as IESKF observations (`common/ieskf`) with non-holonomic constraints, lever-arm compensation, and a chi² slip gate; wheel samples are time-synchronized into the same measurement package as the IMU and LiDAR
 - **18-DOF error state**: position, velocity, rotation, accelerometer bias, gyroscope bias, gravity
 
 ### NDT Map
@@ -34,7 +35,6 @@ A real-time LiDAR-Inertial Odometry system built on an **Iterated Error-State Ka
 - **Composable node** (`inclio_ros2::LioNode`) compatible with component containers
 - **Multi-threaded executor** (3 threads) with separate callback groups for IMU, LiDAR, and map visualization
 - **Optional TF subscription** — the node can listen to `/tf` / `/tf_static` to look up the LiDAR→IMU extrinsic (`use_tf_extrinsic`) and the `base_link`→IMU offset, so odometry, path, and TF are published in the **`base_link` frame**; falls back to the YAML extrinsics if the lookup fails
-- **Tightly-coupled wheel odometry fusion** (optional) — `nav_msgs/Odometry` forward speed + yaw rate fused as IESKF observations with non-holonomic constraints, lever-arm compensation, and a chi² slip gate
 - **Real-time map visualization** — sliding window of the last N scans published on `~/cloud_world`, voxel-downsampled per scan for bounded publish cost
 - **Full map accumulation** — raw world-frame points accumulated in `full_map_`, voxel-filtered at save time; never published over the wire
 - **Map save service** (`~/save_map`) — saves the full voxelized map to PCD via `std_srvs/Trigger`
@@ -199,11 +199,13 @@ frames:
   tf_lookup_timeout: 5.0           # seconds to wait for static TFs on startup
   publish_tf: true                 # broadcast world_frame -> base_frame
 ```
-<!-- ## Architecture
+## Architecture
 
 <p align="center">
-  <img src="doc/architecture.png" alt="IncLIO architecture diagram" width="700"/>
-</p> -->
+  <img src="doc/architecture.svg" alt="IncLIO architecture diagram" width="100%"/>
+</p>
+
+New to LiDAR-Inertial Odometry? See the [plain-language pipeline walkthrough](doc/pipeline_overview.md).
 
 ## Dependencies
 
@@ -232,7 +234,7 @@ The continuous-time motion-compensated undistortion is based on [Direct LiDAR-In
 }
 ```
 
-Many thanks also to [lightning-lm](https://github.com/gaoxiang12/lightning-lm) by [@gaoxiang12](https://github.com/gaoxiang12), whose work inspired parts of this system.
+Many thanks also to [lightning-lm](https://github.com/gaoxiang12/lightning-lm), whose work inspired parts of this system.
 
 ## Star History
 

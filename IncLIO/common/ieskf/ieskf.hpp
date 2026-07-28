@@ -33,7 +33,7 @@ class IESKF {
     using Mat3T = Eigen::Matrix<S, 3, 3>;           // 3x3 matrix type
     using MotionNoiseT = Eigen::Matrix<S, 18, 18>;  // Motion noise type
     using OdomNoiseT = Eigen::Matrix<S, 4, 4>;      // wheel twist noise (fwd, nhc_y, nhc_z, yaw)
-    using GnssNoiseT = Eigen::Matrix<S, 6, 6>;      // GNSS noise type
+    using GnssNoiseT = Eigen::Matrix<S, 6, 6>;      // GNSS noise type ( not used in this version )
     using Mat18T = Eigen::Matrix<S, 18, 18>;        // 18-dimensional covariance type
     using StateT = State<S>;                  // Overall nominal state variable type
 
@@ -57,7 +57,7 @@ class IESKF {
 
         // ---- Wheel odometry (nav_msgs/Odometry twist, base_link frame) ----
         // Lever arm: IMU -> wheel/axle origin, expressed in the IMU body frame [m].
-        // The IMU is NOT on the axle, so this must be set correctly.
+        // if the IMU is NOT on the axle, this must be set correctly.
         Vec3d  r_imu_wheel_   = Vec3d(-0.470, 0.0, -0.805);
 
         // Measurement noise (std-dev). Lateral/vertical (NHC) are tight on purpose.

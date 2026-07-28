@@ -1,9 +1,7 @@
 // cloud_convert.cpp
 //
 // Implements CloudConverter::Convert() for PointCloud2 and (optionally)
-// Livox CustomMsg.  The logic mirrors run_bag.cc's parse_pointcloud2() and
-// parse_livox_custom() but operates on the already-deserialised ROS2 message
-// structs rather than raw CDR bytes.
+// Livox CustomMsg.
 
 #include "ros2_wrapper/cloud_convert.hpp"
 
@@ -27,11 +25,11 @@ void CloudConverter::LoadFromYAML(const std::string &yaml_file) {
         cfg_.lidar_type = LidarType::LIVOX;
         RCLCPP_INFO(rclcpp::get_logger("CloudConverter"), "Using Livox Lidar");
     } else if (lidar_type == 2) {
-        cfg_.lidar_type = LidarType::VELO32;
-        RCLCPP_INFO(rclcpp::get_logger("CloudConverter"), "Using Velodyne 32 Lidar");
+        cfg_.lidar_type = LidarType::VELO;
+        RCLCPP_INFO(rclcpp::get_logger("CloudConverter"), "Using Velodyne Lidar");
     } else if (lidar_type == 3) {
-        cfg_.lidar_type = LidarType::OUST64;
-        RCLCPP_INFO(rclcpp::get_logger("CloudConverter"), "Using OUST 64 Lidar");
+        cfg_.lidar_type = LidarType::OUST;
+        RCLCPP_INFO(rclcpp::get_logger("CloudConverter"), "Using OUST Lidar");
     } else if (lidar_type == 4) {
         cfg_.lidar_type = LidarType::HESAI;
         RCLCPP_INFO(rclcpp::get_logger("CloudConverter"), "Using Hesai Pandar128 Lidar");
@@ -43,10 +41,10 @@ void CloudConverter::LoadFromYAML(const std::string &yaml_file) {
 
 void CloudConverter::Process(const sensor_msgs::msg::PointCloud2 & msg, IncLIO::FullCloudPtr &pcl_out) {
     switch (cfg_.lidar_type) {
-        case LidarType::OUST64:
+        case LidarType::OUST:
             Oust64Handler(msg);
             break;
-        case LidarType::VELO32:
+        case LidarType::VELO:
             VelodyneHandler(msg);
             break;
         case LidarType::HESAI:
@@ -58,7 +56,6 @@ void CloudConverter::Process(const sensor_msgs::msg::PointCloud2 & msg, IncLIO::
             break;
     }
     pcl_out = std::make_shared<IncLIO::FullPointCloudType>(cloud_out_);
-    //*pcl_out = cloud_out_;
 }
 
 #ifdef HAVE_LIVOX_ROS_DRIVER2
@@ -158,9 +155,6 @@ void CloudConverter::HesaiHandler(const sensor_msgs::msg::PointCloud2 & msg) {
     pcl::fromROSMsg(msg, pl_orig);
     int plsize = pl_orig.size();
 
-    // Determine the earliest timestamp in this scan to compute relative offsets.
-    // Hesai timestamps are absolute (seconds since epoch); the undistortion code
-    // expects relative offsets in milliseconds from scan start.
     // Pass 1: find earliest timestamp with proper OMP reduction
     double t0 = std::numeric_limits<double>::max();
     #pragma omp parallel for reduction(min:t0)

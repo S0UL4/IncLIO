@@ -6,13 +6,6 @@ void IMUConverter::Process(const sensor_msgs::msg::Imu & msg, IMUPtr &imu_out) {
     double imu_coeff = imu_coeff_;
     double ts = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9;
 
-    // orientation (quaternion) — skip
-    // auto& q = msg.orientation;
-    // double qw = q.w;
-    // double qx = q.x;
-    // double qy = q.y;
-    // double qz = q.z;
-
     // angular_velocity
     auto& av = msg.angular_velocity;
     double gx = av.x;

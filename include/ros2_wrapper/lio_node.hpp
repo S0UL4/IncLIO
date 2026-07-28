@@ -66,10 +66,12 @@
 #include <condition_variable>
 #include <unordered_map>
 #include <string>
+#include <cstdio>
 
 // TF listener libraries (for reading lidar->imu extrinsic from TF if configured)
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_listener.h>
+#include <pcl/console/print.h>
 
 
 using namespace std::chrono_literals;
@@ -96,6 +98,9 @@ private:
 
     // ── Viz worker (downsample + crop + publish, outside executor pool) ─────
     void VizWorkerLoop();
+
+    // Controlling terminal (/dev/tty) for the in-place init progress bar, or nullptr.
+    FILE* ProgressTTY();
 
 #ifdef HAVE_LIVOX_ROS_DRIVER2
     void LivoxCallback(const livox_ros_driver2::msg::CustomMsg::SharedPtr msg);
@@ -157,6 +162,12 @@ private:
     std::string body_frame_;
     bool publish_path_  = true;
     bool publish_cloud_ = true;
+    bool init_announced_ = false;   // logs the "tracking started" message once
+    bool init_bar_shown_ = false;   // an in-place init progress bar was drawn (needs a closing newline)
+
+    // Controlling terminal for the in-place init progress bar (see ProgressTTY()).
+    std::FILE* progress_tty_ = nullptr;
+    bool       progress_tty_attempted_ = false;
 
     // ── Transformed-scan queue (lidar thread → timer thread) ────────────────
     struct ScanEntry {

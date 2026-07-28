@@ -13,7 +13,6 @@ mapping:
 
 point_filter_num: 4
 max_iteration: 10
-with_ui: true
 
 max_static_acce_var: 0.05
 max_static_gyro_var: 0.01

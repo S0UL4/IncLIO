@@ -102,12 +102,9 @@ install(DIRECTORY common/         DESTINATION include/inclio/common
 )
 
 # ─────────────────────────────────────────────
-# Activate the Viewer flag 
+# Tools (optional ROS2 bag player under tools/)
 # ─────────────────────────────────────────────
-option(BUILD_TOOLS "Build visualization tools (requires Pangolin)" ON)
-if(BUILD_TOOLS)
-  add_compile_definitions(BUILD_TOOLS)
-endif()
+option(BUILD_TOOLS "Build the standalone ROS2 bag player" OFF)
 
 # ─────────────────────────────────────────────
 # Tests (optional)
@@ -117,8 +114,3 @@ if(BUILD_TESTS)
   enable_testing()
   add_subdirectory(test)
 endif()
-
-# ─────────────────────────────────────────────
-# Build the player as it is currently under tools/
-# ─────────────────────────────────────────────
-#add_subdirectory(tools)

@@ -21,10 +21,6 @@ namespace IncLIO {
 
 template <typename T>
 struct State {
-    // TODO: Define state members
-    // TODO: SE3 GetPose() const;
-    // TODO: void Reset();
-    // TODO: static constexpr int ErrorDim = 18;
 
     using Vec3 = Eigen::Matrix<T, 3, 1>;
     using SO3 = Sophus::SO3<T>;

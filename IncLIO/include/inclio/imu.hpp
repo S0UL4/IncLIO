@@ -6,7 +6,6 @@
 
 namespace IncLIO {
 
-// TODO: Define IMU measurement struct
 struct IMUData {
     IMUData() = default;
     IMUData(double t, const Vec3d& gyro, const Vec3d& acce) : timestamp_(t), gyro_(gyro), acce_(acce) {}

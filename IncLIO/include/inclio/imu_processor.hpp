@@ -11,6 +11,7 @@
 
 #include <vector>
 #include <deque>
+#include <algorithm>
 
 namespace IncLIO {
 
@@ -65,6 +66,19 @@ class IMUProcessor {
 
     /// Whether static initialization has completed
     bool InitSuccess() const { return init_success_; }
+
+    /// Initialization progress in [0, 1] — how much static data has been collected
+    /// relative to what init requires. Intended for a user-facing "loading" indicator.
+    double GetInitProgress() const {
+        if (init_success_) return 1.0;
+        if (!config_.use_static_init) {
+            // Prior-based path: only needs ~20 samples to measure imu_dt_.
+            return std::min(1.0, static_cast<double>(init_imu_deque_.size()) / 20.0);
+        }
+        if (init_imu_deque_.empty() || config_.init_time_seconds <= 0.0) return 0.0;
+        const double elapsed = current_time_ - init_start_time_;
+        return std::clamp(elapsed / config_.init_time_seconds, 0.0, 1.0);
+    }
 
     /// Initialization results
     Vec3d GetCovGyro() const { return cov_gyro_; }

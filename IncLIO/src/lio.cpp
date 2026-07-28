@@ -6,10 +6,6 @@
 #include <yaml-cpp/yaml.h>
 #include <execution>
 
-#ifdef BUILD_TOOLS
-#include "tools/ui/pangolin_window.h"
-#endif
-
 namespace IncLIO {
 
 LIO::LIO(const LIOConfig& config) : config_(config) {
@@ -52,12 +48,6 @@ bool LIO::Init(const std::string& config_yaml) {
     }
 
     sync_->Init(config_yaml);
-#ifdef BUILD_TOOLS
-    if (config_.with_ui) {
-        ui_ = std::make_shared<ui::PangolinWindow>();
-        ui_->Init();
-    }
-#endif
     return true;
 }
 
@@ -182,7 +172,7 @@ void LIO::TryInitIMU() {
                                     world_gravity);
         ieskf_.SetR(init_R);
 
-        // Seed current_time_ so the first Predict() dt is ~imu_dt_, not ~1.775e9 s.
+        // Seed current_time_ so the first Predict() dt is ~imu_dt_
         if (!measures_.imu_.empty())
             ieskf_.SetCurrentTime(measures_.imu_.back()->timestamp_);
 
@@ -385,14 +375,6 @@ void LIO::Align() {
         last_was_keyframe_ = true;
     }
 
-#ifdef BUILD_TOOLS
-    if (ui_) {
-        auto nav_state = ieskf_.GetNominalState();
-        ui_->UpdateScan(current_scan_, nav_state.GetSE3());
-        ui_->UpdateNavState(nav_state.GetSE3(), nav_state.v_, nav_state.ba_, nav_state.bg_);
-    }
-#endif
-
     frame_num_++;
 }
 
@@ -412,11 +394,6 @@ bool LIO::IsKeyframe(const SE3& current_pose) {
 
 
 void LIO::Finish() {
-#ifdef BUILD_TOOLS
-    if (ui_) {
-        ui_->Quit();
-    }
-#endif
     INCLIO_INFO("LIO finished, total frames: {}", frame_num_);
 }
 

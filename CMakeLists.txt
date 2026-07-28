@@ -35,7 +35,7 @@ message(STATUS "livox_ros_driver2_FOUND = '${livox_ros_driver2_FOUND}'")
 # ─────────────────────────────────────────────────────────────────────────────
 # IncLIO core — built directly from source inside this package.
 #
-# We disable tools (needs Pangolin) and tests so colcon only builds the
+# We disable the standalone tools and tests so colcon only builds the
 # two libraries we care about: inclio_common and inclio.
 # ─────────────────────────────────────────────────────────────────────────────
 set(BUILD_TOOLS OFF CACHE BOOL "" FORCE)
@@ -117,10 +117,6 @@ install(TARGETS inclio_ros2_node
 install(DIRECTORY include/ DESTINATION include)
 install(DIRECTORY launch/  DESTINATION share/${PROJECT_NAME}/launch)
 install(DIRECTORY config/  DESTINATION share/${PROJECT_NAME}/config)
-
-if(BUILD_BENCHMARKS)
-  add_subdirectory(test)
-endif()
 
 ament_package()
 

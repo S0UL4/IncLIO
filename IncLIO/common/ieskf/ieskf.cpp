@@ -2,21 +2,6 @@
 
 namespace IncLIO {
 
-// TODO: Implement IESKF methods
-//
-// Predict():
-//   - Propagate nominal state using IMU kinematics
-//   - Propagate error-state covariance: P = F * P * F^T + Q
-//   - F is the error-state transition matrix
-//
-// Update():
-//   - For iter = 0..max_iterations:
-//       1. Compute observation Jacobian H and residual z at current state
-//       2. Kalman gain: K = P * H^T * (H * P * H^T + R)^{-1}
-//       3. Error-state correction: dx = K * z
-//       4. Inject dx into nominal state (manifold retraction)
-//       5. Check convergence: if ||dx|| < threshold, break
-//   - Update covariance: P = (I - K*H) * P
 template <typename S>
 bool IESKF<S>::Predict(const IMU& imu) {
     /// The predict step is the same as ESKF because the error state is defined in the tangent space of the manifold, so the IMU propagation is the same as ESKF, 
@@ -119,7 +104,7 @@ bool IESKF<S>::ObserveWheelSpeed(const Odom& odom) {
         v_body += omega.cross(r_iw);             // + ω × r_iw
     }
 
-    // --- 2. Measurement z + residual r (4×1: v_fwd, NHC 0, NHC 0, yaw) ---
+    // --- 2. Measurement z + residual r (4×1: v_fwd (x), NHC 0(y), NHC 0(z), yaw) ---
     Eigen::Matrix<S, 4, 1> z, r;
     z << static_cast<S>(odom.v_fwd_), S(0), S(0), static_cast<S>(odom.yaw_rate_);
     r.template head<3>() = z.template head<3>() - v_body;

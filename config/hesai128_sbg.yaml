@@ -4,35 +4,32 @@
 
 preprocess:
   lidar_type: 4             # 2 = Velodyne / generic PointCloud2
-  scan_line: 128
+  scan_line: 64
   time_scale: 1e-3          # Velodyne per-point time field is in seconds×1000
   imu_coeff: 1.0
 
 mapping:
-  extrinsic_T: [ -0.488, 0.0, 0.385 ]
+  extrinsic_T: [ -0.00065171, -0.00105984, 0.08463266 ]
   extrinsic_R: [ 0, -1, 0,
                 1,  0, 0,
                 0, 0, 1 ]
 
 point_filter_num: 1
 max_iteration: 3
-max_static_acce_var: 0.02
-max_static_gyro_var: 0.05
-imu_init_time: 10.0
+max_static_acce_var: 0.3
+max_static_gyro_var: 0.1
+imu_init_time: 5.0
 
 
-
-# Activating Pangolin viewer, buggy with ROS2 callback groups — disable for now
-with_ui: false              # always false when running under ROS2
 
 # Set use_static_init: false to skip static initialization and use prior biases.
 # Useful when start system while already moving ( for better results , use the static initialization).
 # prior_gravity must be set in body frame when use_static_init is false;
 # [0, 0, -9.81] assumes a level-mounted IMU with z-down convention.
-use_static_init: true
-prior_bg: [-0.000252,  0.000481, -0.002086]
-prior_ba: [ 0.000127, -0.000228, -0.012919]
-prior_gravity: [0.0, 0.0, -9.81]
+use_static_init: false
+prior_bg: [0.00001,  0.00001, 0.00001]
+prior_ba: [ 0.00001, 0.00001, 0.00001]
+prior_gravity: [0.0, 0.0, 0.0]
 
 # DLIO continuous-time motion correction (set false to use original slerp/lerp)
 use_ct_undistort: true
@@ -56,6 +53,6 @@ frames:
   base_frame:        "base_link"      # child of the published SLAM TF
   imu_frame:         "sbg_imu_link"   # used for TF lookup (lidar->imu, base->imu)
   lidar_frame:       "lidar_link"     # used for TF lookup of the lidar->imu extrinsic
-  use_tf_extrinsic:  true             # true: read lidar->imu extrinsic from TF instead of extrinsic_T/R
+  use_tf_extrinsic:  false             # true: read lidar->imu extrinsic from TF instead of extrinsic_T/R
   tf_lookup_timeout: 5.0              # seconds to wait for the static TFs on startup
-  publish_tf: false
+  publish_tf: true

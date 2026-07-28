@@ -16,8 +16,6 @@ mapping:
 point_filter_num: 1
 max_iteration: 10
 
-with_ui: false
-
 max_static_acce_var: 0.05
 max_static_gyro_var: 0.05
 imu_init_time: 7.0

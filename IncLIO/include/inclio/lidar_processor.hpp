@@ -25,11 +25,6 @@ struct LidarProcessorConfig {
     float time_scale = 1e-3f;
 };
 
-// LiDAR point cloud preprocessing (ROS-agnostic)
-//
-// Vendor-specific message conversion (sensor_msgs, livox_ros, etc.)
-// belongs in the ROS2 wrapper layer, not here.
-//
 // This class handles:
 //   - Processing already-converted FullPointCloud data
 //   - Filtering (range, intensity, voxel downsampling)

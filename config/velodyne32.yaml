@@ -22,9 +22,6 @@ imu_init_time: 5.0
 
 
 
-# Activating Pangolin viewer, buggy with ROS2 callback groups — disable for now
-with_ui: false              # always false when running under ROS2
-
 # Set use_static_init: false to skip static initialization and use prior biases.
 # Useful when start system while already moving ( for better results , use the static initialization).
 # prior_gravity must be set in body frame when use_static_init is false;

@@ -3,7 +3,7 @@
 <package format="3">
   <name>inclio_ros2</name>
   <version>0.1.0</version>
-  <description>ROS2 wrapper for IncLIO LiDAR-Inertial Odometry</description>
+  <description>ROS2 wrapper for IncLIO tightly-coupled LiDAR-Inertial-Wheel Odometry</description>
   <maintainer email="you@example.com">Your Name</maintainer>
   <license>MIT</license>
 

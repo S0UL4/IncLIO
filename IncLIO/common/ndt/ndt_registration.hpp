@@ -10,7 +10,7 @@ namespace IncLIO {
 /// NDT scan-to-map registration.
 ///
 /// Provides two modes:
-///   1. AlignNdt()  — standalone Gauss-Newton alignment (for testing / offline use)
+///   1. AlignNdt()  — standalone Gauss-Newton alignment (for testing / offline use), not used in this version of IncLIO.
 ///   2. ComputeResidualAndJacobians()  — computes H^T V H and H^T V r for the
 ///      IESKF update step (the IESKF drives the iteration, not this class)
 class NdtRegistration {
