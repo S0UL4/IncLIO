@@ -10,7 +10,6 @@ A real-time **tightly-coupled LiDAR-Inertial-Wheel Odometry** system built on an
 
 ### Core Odometry
 - **IESKF** with iterated NDT observation model for accurate pose correction
-- **IMU forward propagation** between LiDAR scans for high-rate odometry (100+ Hz), anchored by the corrected state after each NDT alignment
 - **Continuous-time motion-compensated undistortion** — DLIO constant-jerk / angular-acceleration analytical model (eq. 5, Chen et al. 2023) corrects each point to scan-end time; falls back to slerp/lerp via `use_ct_undistort: false`
 - **Tightly-coupled wheel odometry** (optional) — `nav_msgs/Odometry` forward speed + yaw rate fused as IESKF observations (`common/ieskf`) with non-holonomic constraints, lever-arm compensation, and a chi² slip gate; wheel samples are time-synchronized into the same measurement package as the IMU and LiDAR
 - **18-DOF error state**: position, velocity, rotation, accelerometer bias, gyroscope bias, gravity
@@ -238,4 +237,10 @@ Many thanks also to [lightning-lm](https://github.com/gaoxiang12/lightning-lm), 
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=S0UL4/IncLIO&type=Date)](https://star-history.com/#S0UL4/IncLIO&Date)
+<a href="https://www.star-history.com/?repos=S0UL4%2FIncLIO&type=date&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=S0UL4/IncLIO&type=date&theme=dark&legend=top-left&sealed_token=7lxRvpCiv1iOY31ARgp_4QJBnz24MlPzDIRJAJZ8318A10Umj-1hbfInkkydH3L8SnhQefFdLVtIDAIY7YKgRngcqJ7spKvlvdwyYywh7BYkdKLQGQvdcx0HekZ-wSOI0__7vi8COh2tPhX40R0Orsfgc0GyGu8DJWfHIp7L-Om5q7WJ_GBDuuRbNqPr" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=S0UL4/IncLIO&type=date&legend=top-left&sealed_token=7lxRvpCiv1iOY31ARgp_4QJBnz24MlPzDIRJAJZ8318A10Umj-1hbfInkkydH3L8SnhQefFdLVtIDAIY7YKgRngcqJ7spKvlvdwyYywh7BYkdKLQGQvdcx0HekZ-wSOI0__7vi8COh2tPhX40R0Orsfgc0GyGu8DJWfHIp7L-Om5q7WJ_GBDuuRbNqPr" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=S0UL4/IncLIO&type=date&legend=top-left&sealed_token=7lxRvpCiv1iOY31ARgp_4QJBnz24MlPzDIRJAJZ8318A10Umj-1hbfInkkydH3L8SnhQefFdLVtIDAIY7YKgRngcqJ7spKvlvdwyYywh7BYkdKLQGQvdcx0HekZ-wSOI0__7vi8COh2tPhX40R0Orsfgc0GyGu8DJWfHIp7L-Om5q7WJ_GBDuuRbNqPr" />
+ </picture>
+</a>
