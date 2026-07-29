@@ -2,13 +2,9 @@
 
 A real-time **tightly-coupled LiDAR-Inertial-Wheel Odometry** system built on an **Iterated Error-State Kalman Filter (IESKF)** with **Normal Distribution Transform (NDT)** scan-to-map registration. Wheel odometry is fused as a direct IESKF observation (not a loose pose prior) and is optional — the system runs as a pure LiDAR-Inertial (LIO) pipeline when no wheel source is available. Designed for high-rate, low-latency pose estimation on robotic platforms.
 
-<!-- <p align="center">
-  <img src="doc/demo.gif" alt="IncLIO demo" width="800"/>
-</p> -->
-
 <p align="center">
   <a href="https://www.youtube.com/watch?v=_14IvoUcck0">
-    <img src="http://i.ytimg.com/vi/_14IvoUcck0/hqdefault.jpg" alt="YouTube">
+    <img src="doc/video-thumb.png" alt="Watch the IncLIO demo on YouTube" width="800">
   </a>
 </p>
 
