@@ -198,14 +198,6 @@ frames:
   tf_lookup_timeout: 5.0           # seconds to wait for static TFs on startup
   publish_tf: true                 # broadcast world_frame -> base_frame
 ```
-## Architecture
-
-<p align="center">
-  <img src="doc/architecture.svg" alt="IncLIO architecture diagram" width="100%"/>
-</p>
-
-New to LiDAR-Inertial Odometry? See the [plain-language pipeline walkthrough](doc/pipeline_overview.md).
-
 ## Dependencies
 
 - **Eigen3** — linear algebra
@@ -235,7 +227,7 @@ The continuous-time motion-compensated undistortion is based on [Direct LiDAR-In
 
 Many thanks also to [lightning-lm](https://github.com/gaoxiang12/lightning-lm), whose work inspired parts of this system.
 
-## Star History
+<!-- ## Star History
 
 <a href="https://www.star-history.com/?repos=S0UL4%2FIncLIO&type=date&legend=top-left">
  <picture>
@@ -243,4 +235,4 @@ Many thanks also to [lightning-lm](https://github.com/gaoxiang12/lightning-lm), 
    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=S0UL4/IncLIO&type=date&legend=top-left&sealed_token=7lxRvpCiv1iOY31ARgp_4QJBnz24MlPzDIRJAJZ8318A10Umj-1hbfInkkydH3L8SnhQefFdLVtIDAIY7YKgRngcqJ7spKvlvdwyYywh7BYkdKLQGQvdcx0HekZ-wSOI0__7vi8COh2tPhX40R0Orsfgc0GyGu8DJWfHIp7L-Om5q7WJ_GBDuuRbNqPr" />
    <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=S0UL4/IncLIO&type=date&legend=top-left&sealed_token=7lxRvpCiv1iOY31ARgp_4QJBnz24MlPzDIRJAJZ8318A10Umj-1hbfInkkydH3L8SnhQefFdLVtIDAIY7YKgRngcqJ7spKvlvdwyYywh7BYkdKLQGQvdcx0HekZ-wSOI0__7vi8COh2tPhX40R0Orsfgc0GyGu8DJWfHIp7L-Om5q7WJ_GBDuuRbNqPr" />
  </picture>
-</a>
+</a> -->
