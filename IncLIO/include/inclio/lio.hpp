@@ -131,7 +131,7 @@ class LIO {
     /// Get the IESKF gravity estimate
     Vec3d GetGravity() const { return ieskf_.GetGravity(); }
 
-    /// Get the current aligned scan (in world frame)
+    /// Get the current aligned scan (in imu frame)
     CloudPtr GetCurrentScan() const { return current_scan_; }
 
     /// Whether IMU initialization is done

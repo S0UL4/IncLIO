@@ -92,6 +92,7 @@ void LioNode::DeclareParameters() {
     declare_parameter<bool>("publish_tf",    true);
     declare_parameter<bool>("publish_path",  true);
     declare_parameter<bool>("publish_cloud", true);
+    declare_parameter<bool>("publish_body_cloud", true);   // ~/cloud_body for sc_pgo
 
     // Map visualization
     declare_parameter<double>("map_voxel_size",    0.2);   // voxel leaf size for full_map_ and viz window
@@ -110,6 +111,7 @@ bool LioNode::InitLIO() {
     body_frame_    = get_parameter("body_frame").as_string();
     publish_path_  = get_parameter("publish_path").as_bool();
     publish_cloud_ = get_parameter("publish_cloud").as_bool();
+    publish_body_cloud_ = get_parameter("publish_body_cloud").as_bool();
     map_voxel_size_   = get_parameter("map_voxel_size").as_double();
     body_crop_radius_ = get_parameter("body_crop_radius").as_double();
     publish_rate_hz_ = get_parameter("publish_rate_hz").as_double();
@@ -303,6 +305,7 @@ bool LioNode::InitLIO() {
             Eigen::Quaterniond q(tf.transform.rotation.w, tf.transform.rotation.x, tf.transform.rotation.y, tf.transform.rotation.z);
             q.normalize();  // TF quaternions are not exactly unit-norm; Sophus::SO3 asserts orthogonality
             R_imu_base = q.toRotationMatrix();
+            have_base_offset_ = true;
             RCLCPP_INFO(this->get_logger(), "Loaded base->imu offset from TF: %s <- %s",
                         imu_frame_id.c_str(), base_frame_id.c_str());
         } catch (const tf2::TransformException & ex) {
@@ -312,6 +315,11 @@ bool LioNode::InitLIO() {
         }
     }
 
+    // ~/cloud_body frame: the deskewed scan lives in the IMU frame. If a base<-imu
+    // TF was found, rotate it into base_link so it pairs with ~/odometry (which is
+    // already a base_link pose); otherwise publish it as-is in the IMU frame.
+    T_base_imu_          = IncLIO::SE3(R_imu_base, t_imu_base).inverse();
+    body_cloud_frame_id_ = base_frame_id;
     // ── Construct and initialise LIO ──────────────────────────────────────────
     lio_ = std::make_unique<IncLIO::LIO>(lio_config);
     if (!lio_->Init(config_file_)) {
@@ -405,6 +413,10 @@ void LioNode::CreatePublishers() {
 
     if (publish_cloud_) {
         cloud_world_pub_ = create_publisher<sensor_msgs::msg::PointCloud2>("~/cloud_world", 5);
+    }
+
+    if (publish_body_cloud_) {
+        cloud_body_pub_ = create_publisher<sensor_msgs::msg::PointCloud2>("~/cloud_body", 10);
     }
 
     path_msg_.header.frame_id = world_frame_id;
@@ -596,6 +608,7 @@ void LioNode::ProcessCloud(IncLIO::FullCloudPtr cloud, double ts,
     Sophus::SE3d T_base0_imu = T_world_base_init.inverse() * T_world_imu;
 
     PublishOdometry(stamp, T_base0_base, state);
+    if (publish_body_cloud_) PublishBodyCloud(stamp);   // same stamp as the odometry above
     if (publish_path_)  PublishPath(stamp, T_base0_base);
     if (publish_cloud_ && (lio_->WasKeyframe() || lio_->frame_num() % 10 == 0)) PublishCloud(stamp, T_base0_imu);
     if(publish_tf_) PublishTF(stamp, T_base0_base);
@@ -667,6 +680,29 @@ void LioNode::PublishCloud(const rclcpp::Time& /*stamp*/, const IncLIO::SE3& pos
     // Cheap enqueue — transform + voxel insert happens on timer thread
     std::lock_guard<std::mutex> lock(scan_queue_mutex_);
     scan_queue_.push_back({scan, pose});
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PublishBodyCloud
+// ─────────────────────────────────────────────────────────────────────────────
+void LioNode::PublishBodyCloud(const rclcpp::Time& stamp) {
+    if (!cloud_body_pub_ || cloud_body_pub_->get_subscription_count() == 0) return;
+
+    auto scan = lio_->GetCurrentScan();   // IMU frame, deskewed to scan-end time
+    if (!scan || scan->empty()) return;
+
+    sensor_msgs::msg::PointCloud2 msg;
+    if (have_base_offset_) {
+        IncLIO::PointCloudType scan_base;
+        IncLIO::transformCloudOMP(*scan, scan_base, T_base_imu_.matrix().cast<float>());
+        pcl::toROSMsg(scan_base, msg);
+    } else {
+        pcl::toROSMsg(*scan, msg);
+    }
+
+    msg.header.stamp    = stamp;
+    msg.header.frame_id = body_cloud_frame_id_;
+    cloud_body_pub_->publish(msg);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

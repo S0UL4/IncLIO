@@ -13,7 +13,8 @@
 // Publications:
 //   ~/odometry      nav_msgs/msg/Odometry          (pose + twist in world frame)
 //   ~/path          nav_msgs/msg/Path              (trajectory history)
-//   ~/cloud_body    sensor_msgs/msg/PointCloud2    (current scan in body/IMU frame)
+//   ~/cloud_body    sensor_msgs/msg/PointCloud2    (deskewed current scan in base_link,
+//                                                   or IMU frame if no base<-imu TF)
 //   ~/cloud_world   sensor_msgs/msg/PointCloud2    (current scan in world frame)
 //
 // TF:
@@ -111,6 +112,7 @@ private:
                          const IncLIO::Stated& state);
     void PublishPath(const rclcpp::Time& stamp, const IncLIO::SE3& pose);
     void PublishCloud(const rclcpp::Time& stamp, const IncLIO::SE3& pose);
+    void PublishBodyCloud(const rclcpp::Time& stamp);
     void PublishTF(const rclcpp::Time& stamp, const IncLIO::SE3& pose);
 
     // ── Service callbacks ────────────────────────────────────────────────────
@@ -149,6 +151,7 @@ private:
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr   odom_fast_pub_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr       path_pub_;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_world_pub_;
+    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_body_pub_;
 
     std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr save_map_srv_;
@@ -162,6 +165,7 @@ private:
     std::string body_frame_;
     bool publish_path_  = true;
     bool publish_cloud_ = true;
+    bool publish_body_cloud_ = true;   // ~/cloud_body — deskewed scan in body frame
     bool init_announced_ = false;   // logs the "tracking started" message once
     bool init_bar_shown_ = false;   // an in-place init progress bar was drawn (needs a closing newline)
 
@@ -225,6 +229,14 @@ private:
 
     IncLIO::Vec3d t_imu_base{IncLIO::Zero3d};
     IncLIO::Mat3d R_imu_base{IncLIO::Eye3d};
+
+    // base_link ← IMU, used to bring the deskewed scan out of the IMU frame.
+    // Identity (and have_base_offset_ = false) when no base<-imu TF is available,
+    // in which case ~/cloud_body is published in imu_frame_id as-is.
+    IncLIO::SE3 T_base_imu_;
+    bool        have_base_offset_ = false;
+    std::string body_cloud_frame_id_;
+
     IncLIO::Vec3d Lidar_T_wrt_IMU{IncLIO::Zero3d};
     IncLIO::Mat3d Lidar_R_wrt_IMU{IncLIO::Eye3d};
 
