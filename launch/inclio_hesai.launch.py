@@ -25,7 +25,7 @@ def generate_launch_description():
                               description="Path to IncLIO YAML config file"),
         DeclareLaunchArgument("imu_topic",          default_value="/sensor/astra_landins/imu",
                               description="IMU topic"),
-        DeclareLaunchArgument("lidar_topic",        default_value="/astra_lidar/data_filtered",
+        DeclareLaunchArgument("lidar_topic",        default_value="/astra_lidar/data",
                               description="LiDAR PointCloud2 topic"),
         DeclareLaunchArgument("wheel_odom_topic",   default_value="/hardware_interface/odom",
                               description="Wheel-odometry nav_msgs/Odometry topic (empty = disabled)"),

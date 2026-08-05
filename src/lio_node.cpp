@@ -136,25 +136,29 @@ bool LioNode::InitLIO() {
     }
 
     // ── Configure point cloud converter ──────────────────────────────────────
-    converter_.LoadFromYAML(config_file_);  // override with YAML values if present
+    // Anything the YAML leaves out (lidar_type / scan_line / time_scale /
+    // imu_coeff) stays at its "auto" value and is deduced from the first
+    // messages — see cloud_convert.hpp and imu_convert.hpp.
+    converter_.LoadFromYAML(config_file_);
     cc = converter_.Config();
-    // converter_.SetConfig(cc);
-    imu_converter_.SetIMUCoeff(cc.imu_coeff);  // default (set to 9.81 if using raw accel in m/s²)
+    imu_converter_.SetIMUCoeff(cc.imu_coeff);   // 0 => detect from |a|
 
     RCLCPP_INFO(get_logger(), "Loading IncLIO config: %s", config_file_.c_str());
 
-    // Print parameters for verification
-    std::string lidar_type_str_;
-    lidar_type_str_ = (cc.lidar_type == LidarType::LIVOX) ? "LIVOX" :
-                      (cc.lidar_type == LidarType::VELO) ? "VELODYNE" :
-                      (cc.lidar_type == LidarType::OUST) ? "OUSTER" :
-                      (cc.lidar_type == LidarType::HESAI) ? "HESAI" : "UNKNOWN";
-    RCLCPP_INFO(get_logger(), "Config parameters:");
-    RCLCPP_INFO(get_logger(), "  lidar_type: %s", lidar_type_str_.c_str());
-    RCLCPP_INFO(get_logger(), "  num_scans: %d", cc.num_scans);
-    RCLCPP_INFO(get_logger(), "  time_scale: %f", cc.time_scale);
+    // Print parameters for verification. "auto" entries are resolved and logged
+    // again by the converters once the first message arrives.
+    RCLCPP_INFO(get_logger(), "Preprocess parameters:");
+    RCLCPP_INFO(get_logger(), "  lidar_type:       %s",
+                cc.lidar_type == LidarType::UNKNOWN ? "auto" : ToString(cc.lidar_type));
+    if (cc.num_scans > 0)  RCLCPP_INFO(get_logger(), "  scan_line:        %d", cc.num_scans);
+    else                   RCLCPP_INFO(get_logger(), "  scan_line:        auto");
+    if (cc.time_scale > 0) RCLCPP_INFO(get_logger(), "  time_scale:       %g", cc.time_scale);
+    else                   RCLCPP_INFO(get_logger(), "  time_scale:       auto");
+    if (cc.imu_coeff > 0)  RCLCPP_INFO(get_logger(), "  imu_coeff:        %g", cc.imu_coeff);
+    else                   RCLCPP_INFO(get_logger(), "  imu_coeff:        auto");
     RCLCPP_INFO(get_logger(), "  point_filter_num: %d", cc.point_filter_num);
-    RCLCPP_INFO(get_logger(), "  map_voxel_size: %f", map_voxel_size_);
+    RCLCPP_INFO(get_logger(), "  blind:            %.2f m", cc.blind);
+    RCLCPP_INFO(get_logger(), "  map_voxel_size:   %f", map_voxel_size_);
 
 
     // ── Parse YAML to build LIOConfig ─────────────────────────────────────────
@@ -370,36 +374,86 @@ void LioNode::CreateSubscriptions() {
         RCLCPP_INFO(get_logger(), "Wheel odom disabled (wheel_odom_topic empty)");
     }
 
-    // LiDAR — PointCloud2
+    // LiDAR — the message type advertised on the topic decides which of the two
+    // paths to take, so the sensor never has to be declared in the config.
     const auto cloud_qos = rclcpp::SensorDataQoS();
     std::string lidar_topic = get_parameter("lidar_topic").as_string();
-    if(cc.lidar_type != LidarType::LIVOX)
-    {
-    cloud_sub_ = create_subscription<sensor_msgs::msg::PointCloud2>(
-        lidar_topic, cloud_qos,
-        [this](sensor_msgs::msg::PointCloud2::UniquePtr msg) { CloudCallback(std::move(msg)); },
-        lidar_opts);
 
-    RCLCPP_INFO(get_logger(), "Subscribing to PointCloud2: %s", lidar_topic.c_str());
+    const std::string topic_type = DiscoverTopicType(lidar_topic, 5.0);
+    bool want_livox = false, want_pc2 = false;
+    if (topic_type.find("CustomMsg") != std::string::npos) {
+        want_livox = true;
+        RCLCPP_INFO(get_logger(), "Discovered '%s' on %s", topic_type.c_str(), lidar_topic.c_str());
+    } else if (topic_type.find("PointCloud2") != std::string::npos) {
+        want_pc2 = true;
+        RCLCPP_INFO(get_logger(), "Discovered '%s' on %s", topic_type.c_str(), lidar_topic.c_str());
+    } else if (cc.lidar_type != LidarType::UNKNOWN) {
+        // Nothing publishing yet, but the config pinned the sensor — trust it.
+        want_livox = (cc.lidar_type == LidarType::LIVOX);
+        want_pc2   = !want_livox;
+        RCLCPP_WARN(get_logger(),
+            "No publisher on %s yet — using the configured lidar_type (%s)",
+            lidar_topic.c_str(), ToString(cc.lidar_type));
+    } else {
+        // Nothing to go on: subscribe to both. Only the type the publisher
+        // actually advertises will ever match, so whichever driver starts wins.
+        want_livox = want_pc2 = true;
+        RCLCPP_WARN(get_logger(),
+            "No publisher on %s yet and lidar_type is auto — subscribing to both "
+            "PointCloud2 and Livox CustomMsg; the first to publish wins.",
+            lidar_topic.c_str());
     }
-    else 
-    {
-    #ifdef HAVE_LIVOX_ROS_DRIVER2
+
+    if (want_pc2) {
+        cloud_sub_ = create_subscription<sensor_msgs::msg::PointCloud2>(
+            lidar_topic, cloud_qos,
+            [this](sensor_msgs::msg::PointCloud2::UniquePtr msg) { CloudCallback(std::move(msg)); },
+            lidar_opts);
+        RCLCPP_INFO(get_logger(), "Subscribing to PointCloud2: %s", lidar_topic.c_str());
+    }
+    if (want_livox) {
+#ifdef HAVE_LIVOX_ROS_DRIVER2
         livox_sub_ = create_subscription<livox_ros_driver2::msg::CustomMsg>(
             lidar_topic, cloud_qos,
             [this](const livox_ros_driver2::msg::CustomMsg::SharedPtr msg) { LivoxCallback(msg); },
             lidar_opts);
-
-            RCLCPP_INFO(get_logger(), "Subscribing to custom msg: %s", lidar_topic.c_str());
-
-    #endif
+        RCLCPP_INFO(get_logger(), "Subscribing to Livox CustomMsg: %s", lidar_topic.c_str());
+#else
+        if (!want_pc2) {
+            RCLCPP_ERROR(get_logger(),
+                "%s publishes livox_ros_driver2/CustomMsg but this build has no Livox "
+                "support (HAVE_LIVOX_ROS_DRIVER2 undefined) — no LiDAR data will arrive.",
+                lidar_topic.c_str());
+        }
+#endif
     }
+
     const double hz = std::max(0.5, publish_rate_hz_);
     const auto period_ns = std::chrono::nanoseconds(
         static_cast<int64_t>(1.0e9 / hz));
     timer_ = this->create_wall_timer(
         period_ns, std::bind(&LioNode::ui_callback, this), timer_group_);
 
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DiscoverTopicType
+// ─────────────────────────────────────────────────────────────────────────────
+// The ROS graph already knows which message type each publisher advertises, so
+// there is no reason to make the user restate it as `lidar_type`. Polls until a
+// publisher appears (drivers and `ros2 bag play` often start after the node) or
+// the timeout expires.
+std::string LioNode::DiscoverTopicType(const std::string& topic, double timeout_s) {
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                              std::chrono::duration<double>(timeout_s));
+    while (rclcpp::ok()) {
+        const auto publishers = get_publishers_info_by_topic(topic);
+        if (!publishers.empty()) return publishers.front().topic_type();
+        if (std::chrono::steady_clock::now() >= deadline) break;
+        std::this_thread::sleep_for(100ms);
+    }
+    return {};
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -486,8 +540,13 @@ void LioNode::CloudCallback(sensor_msgs::msg::PointCloud2::UniquePtr msg)
         return;
     }
 
+    // Point times are emitted as non-negative offsets from the scan start; when
+    // the driver times its points from the scan end (Velodyne) or on an absolute
+    // clock (Hesai), the scan start is not the header stamp. The converter hands
+    // back that correction rather than losing it.
     const double ts = msg->header.stamp.sec +
-                      msg->header.stamp.nanosec * 1e-9;
+                      msg->header.stamp.nanosec * 1e-9 +
+                      converter_.LastTimeOffsetSeconds();
 
     ProcessCloud(pcl_out, ts, msg->header.stamp);
 }

@@ -23,14 +23,17 @@
 // Threading: uses two MutuallyExclusiveCallbackGroups so IMU buffering
 // runs concurrently with heavy LiDAR processing on a MultiThreadedExecutor.
 //
+// Sensor setup is discovered, not configured: the message type published on
+// lidar_topic decides between the PointCloud2 and the Livox CustomMsg path, the
+// PointCloud2 field table gives the point layout and the per-point time
+// encoding (see cloud_convert.hpp), and the accelerometer unit follows from the
+// magnitude of the first IMU samples (see imu_convert.hpp).
+//
 // Parameters (all have sensible defaults):
 //   config_file       : path to IncLIO YAML config
 //   imu_topic         : default "imu"
 //   lidar_topic       : default "points"
-//   lidar_type        : 1=Livox, 2=Velodyne/generic PC2, 3=Ouster
-//   num_scans         : scan lines
-//   time_scale        : per-point time scale
-//   point_filter_num  : point decimation
+//   point_filter_num  : point decimation (YAML)
 //   world_frame       : default "world"
 //   body_frame        : default "body"
 //   publish_tf        : default true
@@ -90,6 +93,10 @@ private:
     bool InitLIO();
     void CreateSubscriptions();
     void CreatePublishers();
+
+    // Asks the ROS graph which message type is published on `topic`, waiting up
+    // to `timeout_s` for a publisher to appear. Returns "" if none shows up.
+    std::string DiscoverTopicType(const std::string& topic, double timeout_s);
 
     // ── Callbacks ─────────────────────────────────────────────────────────────
     void ImuCallback(sensor_msgs::msg::Imu::UniquePtr msg);

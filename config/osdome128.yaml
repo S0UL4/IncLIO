@@ -2,11 +2,22 @@
 # IncLIO config for Velodyne VLP-16 used via ROS2 live topics.
 # Copy / adjust extrinsics for your sensor mount.
 
-preprocess:
-  lidar_type: 3             # 3 = OUSTER
-  scan_line: 64
-  time_scale: 1e6          # Velodyne per-point time field is in seconds×1000
-  imu_coeff: 1.0
+# preprocess: nothing to set — the sensor setup is detected from the streams.
+#   lidar_type  <- message type advertised on the LiDAR topic, then the
+#                  PointCloud2 field table (x/y/z/intensity/ring/time offsets)
+#   scan_line   <- ring channel (or the cloud height for organized clouds)
+#   time_scale  <- unit of the per-point time field, from the observed span of
+#                  one scan (a revolution lasts 10-500 ms and the candidate
+#                  units s/ms/us/ns are 1000x apart, so the match is unique)
+#   imu_coeff   <- magnitude of the first accelerometer samples (|a| ~ 1 => the
+#                  stream is in g, |a| ~ 9.81 => it is already in m/s^2)
+# Add a `preprocess:` block only to override one of them, e.g.
+#   preprocess:
+#     lidar_type: ouster   # auto | livox | velodyne | ouster | hesai
+#     scan_line:  64
+#     time_scale: 1e-6     # raw per-point time unit -> milliseconds
+#     imu_coeff:  9.80665
+#     blind:      4.0      # drop returns closer than this to the sensor [m]
 
 mapping:
   # extrinsic_T: [0.006253, -0.011775, -0.028535]
@@ -23,8 +34,6 @@ max_iteration: 3
 max_static_acce_var: 0.2
 max_static_gyro_var: 0.2
 imu_init_time: 3.0
-
-
 
 # Set use_static_init: false to skip static initialization and use prior biases.
 # Useful when start system while already moving ( for better results , use the static initialization).
@@ -60,39 +69,3 @@ frames:
   use_tf_extrinsic:  false             # true: read lidar->imu extrinsic from TF instead of extrinsic_T/R
   tf_lookup_timeout: 5.0              # seconds to wait for the static TFs on startup
   publish_tf: true
-# # config/velodyne_ros2.yaml
-# # IncLIO config for Velodyne VLP-16 used via ROS2 live topics.
-# # Copy / adjust extrinsics for your sensor mount.
-
-# preprocess:
-#   lidar_type: 3             # 2 = Velodyne / generic PointCloud2
-#   scan_line: 128
-#   time_scale: 1e6          # Velodyne per-point time field is in seconds×1000
-#   imu_coeff: 1.0
-
-# mapping:
-#   extrinsic_T: [ 0.002, 0.01, 0.04 ]
-#   extrinsic_R: [ -1, 0, 0,
-#                 0, -1, 0,
-#                 0, 0, 1 ]
-
-# point_filter_num: 1
-# max_iteration: 3
-# max_static_acce_var: 0.2
-# max_static_gyro_var: 0.5
-# imu_init_time: 10.0
-
-
-
-
-# # Set use_static_init: false to skip static initialization and use prior biases.
-# # Useful when start system while already moving ( for better results , use the static initialization).
-# # prior_gravity must be set in body frame when use_static_init is false;
-# # [0, 0, -9.81] assumes a level-mounted IMU with z-down convention.
-# use_static_init: true
-# prior_bg: [-0.000252,  0.000481, -0.002086]
-# prior_ba: [ 0.000127, -0.000228, -0.012919]
-# prior_gravity: [0.0, 0.0, -9.81]
-
-# # DLIO continuous-time motion correction (set false to use original slerp/lerp)
-# use_ct_undistort: true

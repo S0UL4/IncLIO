@@ -1,14 +1,25 @@
 # config/livox_mid360_ros2.yaml
 # IncLIO config for Livox Mid-360 used via ROS2 live topics.
 
-preprocess:
-  lidar_type: 1
-  scan_line: 6
-  time_scale: 1e6           # Livox offset_time is in nanoseconds
-  imu_coeff: 9.81                # set to 9.81 if using raw accel in m/s²
+# preprocess: nothing to set — the sensor setup is detected from the streams.
+#   lidar_type  <- message type advertised on the LiDAR topic, then the
+#                  PointCloud2 field table (x/y/z/intensity/ring/time offsets)
+#   scan_line   <- ring channel (or the cloud height for organized clouds)
+#   time_scale  <- unit of the per-point time field, from the observed span of
+#                  one scan (a revolution lasts 10-500 ms and the candidate
+#                  units s/ms/us/ns are 1000x apart, so the match is unique)
+#   imu_coeff   <- magnitude of the first accelerometer samples (|a| ~ 1 => the
+#                  stream is in g, |a| ~ 9.81 => it is already in m/s^2)
+# Add a `preprocess:` block only to override one of them, e.g.
+#   preprocess:
+#     lidar_type: ouster   # auto | livox | velodyne | ouster | hesai
+#     scan_line:  64
+#     time_scale: 1e-6     # raw per-point time unit -> milliseconds
+#     imu_coeff:  9.80665
+#     blind:      4.0      # drop returns closer than this to the sensor [m]
 
 mapping:
-  extrinsic_T: [ 0.04165, 0.02326, -0.0284 ]
+  extrinsic_T: [ -0.011, -0.02329, 0.04412 ]
   extrinsic_R: [ 1, 0, 0,
                  0, 1, 0,
                  0, 0, 1 ]
@@ -18,7 +29,7 @@ max_iteration: 10
 
 max_static_acce_var: 0.05
 max_static_gyro_var: 0.01
-imu_init_time: 7.0
+imu_init_time: 0.1
 
 # Set use_static_init: false to skip static initialization and use prior biases.
 # Useful when start system while already moving ( for better results , use the static initialization).
@@ -31,3 +42,22 @@ prior_gravity: [0.0, 0.0, -9.81]
 
 # DLIO continuous-time motion correction (set false to use original slerp/lerp)
 use_ct_undistort: true
+
+wheel_odom:
+  r_imu_wheel:   [-0.196, 0.012, -0.820]   # IMU -> wheel/axle origin, body frame [m]
+  vel_noise:     0.10                     # forward-speed std-dev [m/s]
+  nhc_noise:     0.01                     # lateral/vertical NHC std-dev [m/s] (keep tight)
+  yaw_noise:     0.10                     # yaw-rate std-dev [rad/s]
+  use_lever_arm: true                     # include lever-arm coupling into gyro bias
+  use_yaw_rate:  true                     # include the yaw-rate (gyro-z-bias) row
+  chi2_thresh:   13.28                    # slip gate: reject obs with chi2 > this (4-DOF 99%); <= 0 disables
+
+
+frames:
+  world_frame:       "odom"           # parent of the published SLAM TF
+  base_frame:        "base_link"      # child of the published SLAM TF
+  imu_frame:         "imu_frame"   # used for TF lookup (lidar->imu, base->imu)
+  lidar_frame:       "lidar_frame"     # used for TF lookup of the lidar->imu extrinsic
+  use_tf_extrinsic:  false             # true: read lidar->imu extrinsic from TF instead of extrinsic_T/R
+  tf_lookup_timeout: 5.0              # seconds to wait for the static TFs on startup
+  publish_tf: true
